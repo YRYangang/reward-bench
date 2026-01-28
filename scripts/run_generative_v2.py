@@ -94,6 +94,12 @@ def get_args():
     parser.add_argument(
         "--force_local", action="store_true", default=False, help="force local run, even if model is on Together API"
     )
+    parser.add_argument(
+        "--enable-thinking",
+        action="store_true",
+        default=False,
+        help="Pass enable_thinking=True to tokenizer.apply_chat_template (if supported by the tokenizer).",
+    )
     args = parser.parse_args()
     return args
 
@@ -417,7 +423,16 @@ def main():
                     },
                     {"role": "user", "content": user_prompt},
                 ]
-                prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                try:
+                    prompt = tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=args.enable_thinking,
+                    )
+                except TypeError:
+                    # Older tokenizers / Transformers may not support `enable_thinking`.
+                    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
                 # chat template already include special tokens
                 # when vllm runs model.generate on prompts, the tokenizer is applied to the prompts
                 # defaulting to add_special_tokens=True - this will end up duplicating the special tokens
@@ -486,7 +501,16 @@ def main():
 
                 # Generate with VLLM
                 messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
-                formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                try:
+                    formatted_prompt = tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=args.enable_thinking,
+                    )
+                except TypeError:
+                    # Older tokenizers / Transformers may not support `enable_thinking`.
+                    formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
                 outputs = model.generate([formatted_prompt], sampling_params=sampling_params)
                 judgement = outputs[0].outputs[0].text.strip()
 
