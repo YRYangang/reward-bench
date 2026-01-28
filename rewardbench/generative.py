@@ -19,22 +19,66 @@
 # pip install google-generativeai>=0.6.4
 
 import json
+import logging
 import os
 import re
 import time as time
 
-import anthropic
-import google.generativeai as genai
-import openai
 from fastchat.conversation import get_conv_template
-from google.generativeai.types import HarmBlockThreshold, HarmCategory
-from openai import OpenAI
-from together import Together
+
+# Optional provider deps. If missing, we degrade gracefully:
+# - import failures won't crash import-time
+# - provider-specific code will return API_ERROR_OUTPUT/"error" rather than raising
+try:
+    import anthropic  # type: ignore
+except Exception:  # noqa: BLE001 - intentionally broad (ImportError, binary issues, etc.)
+    anthropic = None
+
+try:
+    import google.generativeai as genai  # type: ignore
+except Exception:  # noqa: BLE001
+    genai = None
+
+try:
+    from google.generativeai.types import HarmBlockThreshold, HarmCategory  # type: ignore
+except Exception:  # noqa: BLE001
+    HarmBlockThreshold = None
+    HarmCategory = None
+
+try:
+    import openai  # type: ignore
+except Exception:  # noqa: BLE001
+    openai = None
+
+try:
+    from openai import OpenAI  # type: ignore
+except Exception:  # noqa: BLE001
+    OpenAI = None
+
+try:
+    from together import Together  # type: ignore
+except Exception:  # noqa: BLE001
+    Together = None
+
 
 # normalize OpenAI exception names for compatibility with different SDK versions
-APIError = getattr(openai, "APIError", Exception)
-APIConnectionError = getattr(openai, "APIConnectionError", Exception)
-RateLimitError = getattr(openai, "RateLimitError", Exception)
+APIError = getattr(openai, "APIError", Exception) if openai is not None else Exception
+APIConnectionError = getattr(openai, "APIConnectionError", Exception) if openai is not None else Exception
+RateLimitError = getattr(openai, "RateLimitError", Exception) if openai is not None else Exception
+
+_logger = logging.getLogger(__name__)
+_warned_missing_deps: set[str] = set()
+
+
+def _missing_dep(dep_name: str, extra: str | None = None) -> None:
+    """Log once per missing optional dependency."""
+    if dep_name in _warned_missing_deps:
+        return
+    _warned_missing_deps.add(dep_name)
+    msg = f"Optional dependency '{dep_name}' is not available; skipping related code."
+    if extra:
+        msg += f" ({extra})"
+    _logger.warning(msg)
 
 ANTHROPIC_MODEL_LIST = (
     "claude-1",
@@ -516,38 +560,56 @@ def run_judge_pair(question, answer_a, answer_b, model, multi_turn=False, model_
         return winners, user_prompt, judgments
 
     if model in OPENAI_MODEL_LIST:
-        template = "chatgpt"
-        conv = get_conv_template(template)
+        if OpenAI is None or openai is None:
+            _missing_dep("openai", "install openai>=1.0")
+            judgment = API_ERROR_OUTPUT
+        else:
+            template = "chatgpt"
+            conv = get_conv_template(template)
 
-        conv.append_message(conv.roles[0], user_prompt)
-        conv.append_message(conv.roles[1], None)
-        conv.set_system_message(system_prompt)
+            conv.append_message(conv.roles[0], user_prompt)
+            conv.append_message(conv.roles[1], None)
+            conv.set_system_message(system_prompt)
 
-        judgment = chat_completion_openai(model, conv, temperature=0, max_tokens=2048)
+            judgment = chat_completion_openai(model, conv, temperature=0, max_tokens=2048)
     elif model in ANTHROPIC_MODEL_LIST:
-        template = "claude"
-        conv = get_conv_template(template)
+        if anthropic is None:
+            _missing_dep("anthropic", "install anthropic>=0.21.3")
+            judgment = API_ERROR_OUTPUT
+        else:
+            template = "claude"
+            conv = get_conv_template(template)
 
-        conv.set_system_message(system_prompt)
-        conv.append_message(conv.roles[0], user_prompt)
-        conv.append_message(conv.roles[1], None)
-        conv.messages = conv.to_openai_api_messages()
+            conv.set_system_message(system_prompt)
+            conv.append_message(conv.roles[0], user_prompt)
+            conv.append_message(conv.roles[1], None)
+            conv.messages = conv.to_openai_api_messages()
 
-        judgment = chat_completion_anthropic(model, conv, temperature=0, max_tokens=1024)
+            judgment = chat_completion_anthropic(model, conv, temperature=0, max_tokens=1024)
     elif model in GEMINI_MODEL_LIST:
-        text = user_prompt
-        judgment = chat_completion_gemini(model, text, temperature=0, max_tokens=4096)
+        if genai is None or HarmCategory is None or HarmBlockThreshold is None:
+            _missing_dep("google-generativeai", "install google-generativeai>=0.6.4")
+            judgment = "error"
+        else:
+            text = user_prompt
+            judgment = chat_completion_gemini(model, text, temperature=0, max_tokens=4096)
     elif model in TOGETHER_MODEL_LIST:
-        template = "chatgpt"  # template doesn't matter, it just uses raw messages later
-        conv = get_conv_template(template)
+        if Together is None:
+            _missing_dep("together", "install together>=1.1.3")
+            judgment = API_ERROR_OUTPUT
+        else:
+            template = "chatgpt"  # template doesn't matter, it just uses raw messages later
+            conv = get_conv_template(template)
 
-        conv.append_message(conv.roles[0], user_prompt)
-        conv.append_message(conv.roles[1], None)
-        conv.set_system_message(system_prompt)
-        judgment = chat_completion_together(model, conv, temperature=0, max_tokens=2048)
+            conv.append_message(conv.roles[0], user_prompt)
+            conv.append_message(conv.roles[1], None)
+            conv.set_system_message(system_prompt)
+            judgment = chat_completion_together(model, conv, temperature=0, max_tokens=2048)
 
     else:
-        raise ValueError(f"Model {model} not supported")
+        # Don't crash full evaluation runs if a model/provider isn't supported here.
+        _logger.warning(f"Model {model} not supported")
+        judgment = API_ERROR_OUTPUT
 
     winner = process_judgement(judgment, model_modifier)
     return winner, user_prompt, judgment
@@ -566,6 +628,9 @@ def chat_completion(
     messages should be a list of {"role": ..., "content": ...}.
     Code generated by GPT-o4-mini-high.
     """
+    if OpenAI is None:
+        _missing_dep("openai", "install openai>=1.0")
+        return API_ERROR_OUTPUT
     _client = OpenAI()  # TODO move this to a global variable nicely
 
     for attempt in range(1, retries + 1):
@@ -590,10 +655,11 @@ def chat_completion(
         except (APIError, APIConnectionError, RateLimitError) as e:
             # simple exponential backoff
             wait = backoff * (2 ** (attempt - 1))
-            print(f"[Attempt {attempt}/{retries}] {type(e).__name__}: {e}. retrying in {wait}s…")
+            _logger.warning(f"[Attempt {attempt}/{retries}] {type(e).__name__}: {e}. retrying in {wait}s…")
             time.sleep(wait)
 
-    raise RuntimeError(f"chat_completion failed after {retries} attempts")
+    # Don't crash the full run on transient API failures.
+    return API_ERROR_OUTPUT
 
 
 ratings_prompt = """
@@ -645,6 +711,9 @@ def _get_single_rating(
     try:
         # --- ChatGPT / OpenAI models ---
         if model in OPENAI_MODEL_LIST:
+            if OpenAI is None:
+                _missing_dep("openai", "install openai>=1.0")
+                return -1, API_ERROR_OUTPUT
             # build messages list
             messages = []
             if system_prompt:
@@ -665,6 +734,9 @@ def _get_single_rating(
 
         # --- Gemini (text-only) ---
         elif model in GEMINI_MODEL_LIST:
+            if genai is None or HarmCategory is None or HarmBlockThreshold is None:
+                _missing_dep("google-generativeai", "install google-generativeai>=0.6.4")
+                return -1, API_ERROR_OUTPUT
             # TODO: switch to messages API once Gemini supports it
             text_prompt = user_prompt if not system_prompt else f"{system_prompt}\n\n{user_prompt}"
             raw_judgment = chat_completion_gemini(model, text_prompt, temperature=0, max_tokens=256)
@@ -760,6 +832,9 @@ def run_judge_ratings(
 # also uses ArenaHard code
 # noqa https://github.com/lm-sys/arena-hard/blob/51c04e5a6449e920c01d4159f56a051216af6bd9/utils.py#L166
 def chat_completion_anthropic(model, conv, temperature, max_tokens, api_dict=None):
+    if anthropic is None:
+        _missing_dep("anthropic", "install anthropic>=0.21.3")
+        return API_ERROR_OUTPUT
     if api_dict is not None and "api_key" in api_dict:
         api_key = api_dict["api_key"]
     else:
@@ -791,6 +866,9 @@ def chat_completion_anthropic(model, conv, temperature, max_tokens, api_dict=Non
 
 
 def chat_completion_gemini(model, conv, temperature, max_tokens, api_dict=None):
+    if genai is None or HarmCategory is None or HarmBlockThreshold is None:
+        _missing_dep("google-generativeai", "install google-generativeai>=0.6.4")
+        return "error"
     genai.configure(api_key=os.environ["GEMINI_API_KEY"])
     api_model = genai.GenerativeModel(model)
 
@@ -842,6 +920,9 @@ def chat_completion_gemini(model, conv, temperature, max_tokens, api_dict=None):
 
 
 def chat_completion_together(model, conv, temperature, max_tokens, api_dict=None):
+    if Together is None:
+        _missing_dep("together", "install together>=1.1.3")
+        return API_ERROR_OUTPUT
     client = Together(api_key=os.environ["TOGETHER_API_KEY"])
     output = API_ERROR_OUTPUT
     for _ in range(API_MAX_RETRY):
@@ -860,6 +941,9 @@ def chat_completion_together(model, conv, temperature, max_tokens, api_dict=None
 
 
 def chat_completion_openai(model, conv, temperature, max_tokens, api_dict=None):
+    if OpenAI is None or openai is None:
+        _missing_dep("openai", "install openai>=1.0")
+        return API_ERROR_OUTPUT
     client = OpenAI()
     output = API_ERROR_OUTPUT
     for _ in range(API_MAX_RETRY):
