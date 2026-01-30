@@ -4,10 +4,8 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint
 from transformers import LlamaModel, LlamaPreTrainedModel
-from transformers.models.llama.modeling_llama import LLAMA_INPUTS_DOCSTRING
-from transformers.utils import ModelOutput, add_start_docstrings_to_model_forward
+from transformers.utils import ModelOutput
 
 
 class GatingNetwork(nn.Module):
@@ -122,7 +120,6 @@ class LlamaForRewardModelWithGating31(LlamaPreTrainedModel):
             attn_implementation="flash_attention_2",
         )
 
-    @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -238,7 +235,6 @@ class LlamaForRewardModelWithGating3(LlamaPreTrainedModel):
             pretrained_model_name_or_path, trust_remote_code=True, attn_implementation="flash_attention_2"
         )
 
-    @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: torch.LongTensor = None,

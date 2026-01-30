@@ -30,14 +30,8 @@ from transformers import (
     PretrainedConfig,
     PreTrainedModel,
 )
-from transformers.models.llama.modeling_llama import (
-    _CONFIG_FOR_DOC,
-    LLAMA_INPUTS_DOCSTRING,
-)
-from transformers.utils.doc import (
-    add_start_docstrings_to_model_forward,
-    replace_return_docstrings,
-)
+from transformers.models.llama.modeling_llama import LlamaConfig
+from transformers.utils.doc import replace_return_docstrings
 from transformers.utils.generic import ModelOutput
 
 NormalizeFunction = Literal["affine", "scale", "translate", "identity"]
@@ -397,8 +391,7 @@ class LlamaForScore(ScoreModelMixin, LlamaPreTrainedModel):
     def get_decoder(self) -> PreTrainedModel:
         return self.model
 
-    @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=ScoreModelOutput, config_class=_CONFIG_FOR_DOC)
+    @replace_return_docstrings(output_type=ScoreModelOutput, config_class=LlamaConfig)
     def forward(  # pylint: disable=too-many-arguments
         self,
         input_ids: torch.LongTensor | None = None,
