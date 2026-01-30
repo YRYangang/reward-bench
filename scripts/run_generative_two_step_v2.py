@@ -23,7 +23,6 @@ import logging
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import partial
 
 import numpy as np
 from datasets import concatenate_datasets
@@ -44,7 +43,8 @@ from rewardbench.generative import (
     run_judge_two_step_four,
 )
 from rewardbench.generative_v2 import (
-    get_single_rating,
+    get_ties_rating_user_prompts,
+    parse_rating_from_judgment,
     run_judge_ratings_multi,
 )
 
@@ -307,36 +307,30 @@ def main():
             batch["mult_turn"] = mult_turn
             return batch
 
-        vllm_model_dict = {
-            "model": model,
-            "tokenizer": tokenizer,
-            "sampling_params": default_sampling_params,
-            "chat_template": get_conv_template(args.chat_template) if args.chat_template else None,
-        }
         logger.info("*** Run inference on Ties subset (ratings) ***")
         ties_dataset_formatted = ties_dataset.map(format_ratings)
-        results_ties = []
-        for batch_idx, batch in enumerate(ties_dataset_formatted):
+        # Build (question, answer) pairs and index mapping; batch generate via rewardbench helpers
+        question_answer_pairs = []
+        index_mapping = []  # (batch_idx, ans_idx) for each pair
+        n_batches = len(ties_dataset_formatted)
+        results_ties = [[-1] * len(ties_dataset_formatted[b]["answers"]) for b in range(n_batches)]
+        for batch_idx in range(n_batches):
+            batch = ties_dataset_formatted[batch_idx]
             prompt = batch["prompt"]
-            mult_turn = batch["mult_turn"]
-            ratings = []
             for ans_idx, answer_text in enumerate(batch["answers"]):
                 if (prompt or "").strip() == "" or (answer_text or "").strip() == "":
                     logger.warning(
-                        f"Ties batch {batch_idx} answer {ans_idx}: empty prompt or answer, skipping vLLM call (rating=-1)"
+                        f"Ties batch {batch_idx} answer {ans_idx}: empty prompt or answer, skipping (rating=-1)"
                     )
-                    ratings.append(-1)
                     continue
-                rating, _ = get_single_rating(
-                    question_text=prompt,
-                    answer_text=answer_text,
-                    model=args.model,
-                    model_modifier=model_modifier,
-                    is_ties=True,
-                    vllm_model=vllm_model_dict,
-                )
-                ratings.append(rating)
-            results_ties.append(ratings)
+                question_answer_pairs.append((prompt, answer_text))
+                index_mapping.append((batch_idx, ans_idx))
+        if question_answer_pairs:
+            user_prompts = get_ties_rating_user_prompts(question_answer_pairs)
+            all_ties_prompts = [_messages_to_prompt("", u) for u in user_prompts]
+            all_ties_outputs = _batch_generate(all_ties_prompts, default_sampling_params)
+            for (batch_idx, ans_idx), raw_judgment in zip(index_mapping, all_ties_outputs):
+                results_ties[batch_idx][ans_idx] = parse_rating_from_judgment(raw_judgment or "")
 
     ############################
     # Print & process results

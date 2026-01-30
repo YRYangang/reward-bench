@@ -41,7 +41,10 @@ from rewardbench.generative_v2 import (
     GEMINI_MODEL_LIST,
     OPENAI_MODEL_LIST,
     format_judge_answers,
+    get_rating_user_prompts,
     get_single_rating,
+    get_ties_rating_user_prompts,
+    parse_rating_from_judgment,
     process_judgement,
     run_judge_four,
     run_judge_ratings_multi,
@@ -342,6 +345,34 @@ def main():
             "chat_template": chat_template,  # Add this
         }
 
+        def _messages_to_prompt(system_content, user_content):
+            """Build model prompt from system + user (for batched ratings)."""
+            if chat_template is not None:
+                chat_template.set_system_message(system_content or "")
+                chat_template.messages = []
+                chat_template.append_message(chat_template.roles[0], user_content)
+                chat_template.append_message(chat_template.roles[1], None)
+                return chat_template.get_prompt()
+            messages = [
+                {"role": "system", "content": system_content or ""},
+                {"role": "user", "content": user_content},
+            ]
+            try:
+                return tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True, enable_thinking=args.enable_thinking,
+                )
+            except TypeError:
+                return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+        def _batch_generate(prompts_list):
+            """Run vLLM generate on a list of prompts; return list of output texts."""
+            if model_modifier == "Atla":
+                prompt_token_ids = [tokenizer(p, add_special_tokens=False)["input_ids"] for p in prompts_list]
+                outputs = model.generate(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
+            else:
+                outputs = model.generate(prompts_list, sampling_params=sampling_params)
+            return [o.outputs[0].text for o in outputs]
+
         def format_judgements(batch, optional_chat_template=None):
             # TODO expand this to include fastchat chat templates if needed
             mult_turn = True if len(batch["texts_chosen"]) > 2 else False
@@ -526,15 +557,65 @@ def main():
 
         # Choose processing method based on scoring approach
         if args.score_w_ratings:
-            # Process non-ties dataset with ratings
-            logger.info("*** Run inference on non-ties subsets with ratings ***")
+            # Single batched vLLM run: all non-ties + Ties rating prompts in one _batch_generate
+            logger.info("*** Run inference on non-ties + Ties (ratings, single batch) ***")
             dataset_formatted = dataset.map(format_ratings, fn_kwargs={"is_ties": False})
-            results = []
-            for i, batch in enumerate(dataset_formatted):
-                if args.debug and i % 10 == 0:
-                    print(f"Processing non-ties {i}/{len(dataset_formatted)}")
-                result = get_vllm_judgement(batch, is_ties=False)
-                results.append(result)
+            ties_dataset_formatted = ties_dataset.map(format_ratings, fn_kwargs={"is_ties": True})
+            n_batches_nt = len(dataset_formatted)
+            n_batches_ties = len(ties_dataset_formatted)
+
+            all_prompts = []
+            output_spec = []  # ("nt", batch_idx, ans_idx) or ("ties", batch_idx, ans_idx)
+
+            # Non-ties: (question, answer) pairs and spec
+            for batch_idx in range(n_batches_nt):
+                batch = dataset_formatted[batch_idx]
+                prompt = batch["prompt"]
+                for ans_idx, answer_text in enumerate(batch["answers"]):
+                    all_prompts.append(
+                        _messages_to_prompt("", get_rating_user_prompts([(prompt, answer_text)])[0])
+                    )
+                    output_spec.append(("nt", batch_idx, ans_idx))
+
+            # Ties: (question, answer) pairs and spec (skip empty)
+            results_ties = [[-1] * len(ties_dataset_formatted[b]["answers"]) for b in range(n_batches_ties)]
+            for batch_idx in range(n_batches_ties):
+                batch = ties_dataset_formatted[batch_idx]
+                prompt = batch["prompt"]
+                for ans_idx, answer_text in enumerate(batch["answers"]):
+                    if (prompt or "").strip() == "" or (answer_text or "").strip() == "":
+                        if args.debug:
+                            logger.warning(
+                                f"Ties batch {batch_idx} answer {ans_idx}: empty prompt or answer, skipping (rating=-1)"
+                            )
+                        continue
+                    all_prompts.append(
+                        _messages_to_prompt("", get_ties_rating_user_prompts([(prompt, answer_text)])[0])
+                    )
+                    output_spec.append(("ties", batch_idx, ans_idx))
+
+            if all_prompts:
+                all_outputs = _batch_generate(all_prompts)
+                n_answers_per_batch = [len(dataset_formatted[b]["answers"]) for b in range(n_batches_nt)]
+                ratings_per_batch = [[-1] * n for n in n_answers_per_batch]
+                for (kind, batch_idx, ans_idx), raw_judgment in zip(output_spec, all_outputs):
+                    r = parse_rating_from_judgment(raw_judgment or "")
+                    if kind == "nt":
+                        ratings_per_batch[batch_idx][ans_idx] = r
+                    else:
+                        results_ties[batch_idx][ans_idx] = r
+                results = []
+                for batch_idx in range(n_batches_nt):
+                    ratings = ratings_per_batch[batch_idx]
+                    valid_ratings = [x for x in ratings if x != -1]
+                    if not valid_ratings:
+                        results.append(0.25)
+                        continue
+                    max_rating = max(valid_ratings)
+                    winners = [i for i, x in enumerate(ratings) if x == max_rating]
+                    results.append((0 in winners) / len(winners))
+            else:
+                results = []
 
         else:
             # Process non-ties dataset with 4-way comparison
@@ -577,15 +658,33 @@ def main():
 
             results = [process_shuffled(w, s) for w, s in zip(winners, shuffle_position)]
 
-        # Process ties dataset with ratings (mandatory)
-        logger.info("*** Run inference on Ties subset with ratings ***")
-        ties_dataset_formatted = ties_dataset.map(format_ratings, fn_kwargs={"is_ties": True})
-        results_ties = []
-        for i, batch in enumerate(ties_dataset_formatted):
-            if args.debug and i % 10 == 0:
-                print(f"Processing ties {i}/{len(ties_dataset_formatted)}")
-            result = get_vllm_judgement(batch, is_ties=True)
-            results_ties.append(result)
+        # When not using ratings (4-way path), process Ties subset separately
+        if not args.score_w_ratings:
+            logger.info("*** Run inference on Ties subset with ratings ***")
+            ties_dataset_formatted = ties_dataset.map(format_ratings, fn_kwargs={"is_ties": True})
+            question_answer_pairs = []
+            index_mapping = []
+            n_batches_ties = len(ties_dataset_formatted)
+            results_ties = [[-1] * len(ties_dataset_formatted[b]["answers"]) for b in range(n_batches_ties)]
+            for batch_idx in range(n_batches_ties):
+                batch = ties_dataset_formatted[batch_idx]
+                prompt = batch["prompt"]
+                for ans_idx, answer_text in enumerate(batch["answers"]):
+                    if (prompt or "").strip() == "" or (answer_text or "").strip() == "":
+                        if args.debug:
+                            logger.warning(
+                                f"Ties batch {batch_idx} answer {ans_idx}: empty prompt or answer, skipping (rating=-1)"
+                            )
+                        continue
+                    question_answer_pairs.append((prompt, answer_text))
+                    index_mapping.append((batch_idx, ans_idx))
+            if question_answer_pairs:
+                user_prompts = get_ties_rating_user_prompts(question_answer_pairs)
+                all_ties_prompts = [_messages_to_prompt("", u) for u in user_prompts]
+                all_ties_outputs = _batch_generate(all_ties_prompts)
+                for (batch_idx, ans_idx), raw_judgment in zip(index_mapping, all_ties_outputs):
+                    results_ties[batch_idx][ans_idx] = parse_rating_from_judgment(raw_judgment or "")
+        # When args.score_w_ratings: results_ties already filled in the single _batch_generate block above
 
     ############################
     # Print & process results

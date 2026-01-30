@@ -391,6 +391,42 @@ Notes:
 [Your judgement]"""
 
 
+def parse_rating_from_judgment(raw_judgment: str) -> int:
+    """
+    Parse a trailing integer 1–10 from model judgment text.
+    Returns 1–10 on success, -1 otherwise.
+    """
+    if not raw_judgment or raw_judgment.strip() == "" or raw_judgment == API_ERROR_OUTPUT:
+        return -1
+    m = re.search(r"\b([1-9]|10)\b\s*$", raw_judgment.strip())
+    if not m:
+        return -1
+    r = int(m.group(1))
+    return r if 1 <= r <= 10 else -1
+
+
+def get_ties_rating_user_prompts(question_answer_pairs: list[tuple[str, str]]) -> list[str]:
+    """
+    Build Ties rating user prompts for a list of (question, answer) pairs.
+    Returns list of user prompt strings (no chat template applied).
+    """
+    return [
+        ratings_prompt_ties.format(prompt=q, completion=a)
+        for q, a in question_answer_pairs
+    ]
+
+
+def get_rating_user_prompts(question_answer_pairs: list[tuple[str, str]]) -> list[str]:
+    """
+    Build (non-Ties) rating user prompts for a list of (question, answer) pairs.
+    Returns list of user prompt strings (no chat template applied).
+    """
+    return [
+        ratings_prompt.format(prompt=q, completion=a)
+        for q, a in question_answer_pairs
+    ]
+
+
 # Function to get a single rating from an LLM
 def get_single_rating(
     question_text: str,
@@ -456,13 +492,7 @@ def get_single_rating(
         else:
             raise ValueError(f"Model {model} not supported for ratings.")
 
-        # parse a trailing integer 1–10
-        if raw_judgment and raw_judgment != API_ERROR_OUTPUT:
-            m = re.search(r"\b([1-9]|10)\b\s*$", raw_judgment.strip())
-            if m:
-                rating = int(m.group(1))
-                if 1 <= rating <= 10:
-                    parsed_rating = rating
+        parsed_rating = parse_rating_from_judgment(raw_judgment)
 
     except Exception as e:
         print(f"Error during rating for model={model}," f" question={question_text[:30]!r}: {e}")
