@@ -680,6 +680,65 @@ Notes:
 
 [Your judgement]"""
 
+# 0-5 scale for two-step judge: individual analysis only (no parsing); step 2 does pairwise.
+ratings_prompt_0_5 = """
+### Task Description
+Please act as an impartial judge and evaluate the quality of the response(s) provided by an
+AI assistant to the user query/context displayed below.
+
+Notes:
+1- Your evaluation should consider factors such as the helpfulness, relevance, accuracy, depth, creativity, and level of detail of the response(s).
+2- Begin your evaluation by providing a short explanation.
+3- Be as objective as possible. After providing your explanation, please rate the response on a scale of 0 to 5. For your rating, only give a number between 0 and 5 (inclusive).
+
+[Query / Context]
+{prompt}
+
+[Assistant's Response(s)]
+{completion}
+
+[Your judgement]"""
+
+# Step 2: given candidates and the two raw analyses, ask for [[A]] or [[B]].
+prompt_two_step_verdict = (
+    "You are given the same user question and two assistants' responses (Assistant A and Assistant B), "
+    "along with a previous individual analysis for each assistant (including an explanation and a score 0-5). "
+    "The task is to decide which assistant is better. Your evaluation should consider factors such as the helpfulness, relevance, accuracy, depth, creativity, and level of detail of the response(s)."
+    "Output your final verdict by strictly following this format: "
+    '"[[A]]" if assistant A is better, "[[B]]" if assistant B is better.'
+)
+
+template_two_step_verdict = (
+    "[User Question]\n{question}\n\n"
+    "[The Start of Assistant A's Answer]\n{answer_a}\n[The End of Assistant A's Answer]\n\n"
+    "[The Start of Assistant B's Answer]\n{answer_b}\n[The End of Assistant B's Answer]\n\n"
+    "[Individual analysis for Assistant A]\n{analysis_a}\n\n"
+    "[Individual analysis for Assistant B]\n{analysis_b}\n\n"
+    "[Your verdict]"
+)
+
+# 4-way two-step (RB2): rate each of A/B/C/D on 0-5, then verdict [[A]]/[[B]]/[[C]]/[[D]].
+prompt_two_step_verdict_four = (
+    "You are given the same user question and four assistants' responses (A, B, C, D), "
+    "along with a previous individual analysis for each (including an explanation and a score 0-5). "
+    "Using only this information, decide which assistant is best. "
+    "Output your final verdict by strictly following this format: "
+    '"[[A]]" if assistant A is best, "[[B]]" if assistant B is best, '
+    '"[[C]]" if assistant C is best, "[[D]]" if assistant D is best.'
+)
+template_two_step_verdict_four = (
+    "[User Question]\n{question}\n\n"
+    "[Assistant A's Answer]\n{answer_a}\n\n"
+    "[Assistant B's Answer]\n{answer_b}\n\n"
+    "[Assistant C's Answer]\n{answer_c}\n\n"
+    "[Assistant D's Answer]\n{answer_d}\n\n"
+    "[Individual analysis for A]\n{analysis_a}\n\n"
+    "[Individual analysis for B]\n{analysis_b}\n\n"
+    "[Individual analysis for C]\n{analysis_c}\n\n"
+    "[Individual analysis for D]\n{analysis_d}\n\n"
+    "[Your verdict]"
+)
+
 
 # Helper function to get a single rating from an LLM
 def _get_single_rating(
@@ -827,6 +886,306 @@ def run_judge_ratings(
     }
 
     return winner, user_prompt_for_a_rating, combined_judgments_info
+
+
+def _format_single_candidate_for_rating(question: str, answer_list: list, multi_turn: bool) -> tuple[str, str]:
+    """Format (prompt, completion) for rating one candidate. completion is the assistant's response(s)."""
+    if not multi_turn:
+        return question, answer_list[1]["content"]
+    # Multi-turn: context = question_1, completion = answer_1 + question_2 + answer_2 + ...
+    parts = [f"[User Question 1]\n{question}\n\n[Assistant's Answer 1]\n{answer_list[1]['content']}"]
+    for i in range(2, len(answer_list) - 1, 2):
+        if i + 1 < len(answer_list):
+            parts.append(
+                f"\n\n[User Question {(i // 2) + 2}]\n{answer_list[i]['content']}\n\n"
+                f"[Assistant's Answer {(i // 2) + 2}]\n{answer_list[i + 1]['content']}"
+            )
+    return question, "\n\n".join(parts)
+
+
+def get_rating_0_5_user_prompt(question: str, answer_list: list, multi_turn: bool = False) -> str:
+    """Return the user prompt for the 0-5 single-candidate rating (for vLLM or other single-call use)."""
+    prompt, completion = _format_single_candidate_for_rating(question, answer_list, multi_turn)
+    return ratings_prompt_0_5.format(prompt=prompt, completion=completion)
+
+
+def _get_single_rating_0_5(
+    question_text: str,
+    answer_list: list,
+    model: str,
+    multi_turn: bool = False,
+    model_modifier: str | None = None,
+) -> str:
+    """
+    Get the model's raw analysis (explanation + score 0-5) for one candidate's answer(s).
+    Returns raw_judgment only; no parsing of the score.
+    """
+    prompt, completion = _format_single_candidate_for_rating(question_text, answer_list, multi_turn)
+    user_prompt = ratings_prompt_0_5.format(prompt=prompt, completion=completion)
+    system_prompt = ""
+
+    raw_judgment = API_ERROR_OUTPUT
+
+    try:
+        if model in OPENAI_MODEL_LIST:
+            if OpenAI is None or openai is None:
+                _missing_dep("openai", "install openai>=1.0")
+                return API_ERROR_OUTPUT
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": user_prompt})
+            raw_judgment = chat_completion(model=model, messages=messages, temperature=0, max_tokens=1024)
+        elif model in ANTHROPIC_MODEL_LIST:
+            if anthropic is None:
+                _missing_dep("anthropic", "install anthropic>=0.21.3")
+                return API_ERROR_OUTPUT
+            template = "claude"
+            conv = get_conv_template(template)
+            conv.set_system_message(system_prompt)
+            conv.append_message(conv.roles[0], user_prompt)
+            conv.append_message(conv.roles[1], None)
+            conv.messages = conv.to_openai_api_messages()
+            raw_judgment = chat_completion_anthropic(model, conv, temperature=0, max_tokens=1024)
+        elif model in GEMINI_MODEL_LIST:
+            if genai is None or HarmCategory is None or HarmBlockThreshold is None:
+                _missing_dep("google-generativeai", "install google-generativeai>=0.6.4")
+                return API_ERROR_OUTPUT
+            text_prompt = user_prompt if not system_prompt else f"{system_prompt}\n\n{user_prompt}"
+            raw_judgment = chat_completion_gemini(model, text_prompt, temperature=0, max_tokens=1024)
+        elif model in TOGETHER_MODEL_LIST:
+            if Together is None:
+                _missing_dep("together", "install together>=1.1.3")
+                return API_ERROR_OUTPUT
+            template = "chatgpt"
+            conv = get_conv_template(template)
+            conv.set_system_message(system_prompt)
+            conv.append_message(conv.roles[0], user_prompt)
+            conv.append_message(conv.roles[1], None)
+            raw_judgment = chat_completion_together(model, conv, temperature=0, max_tokens=1024)
+        else:
+            _logger.warning(f"Model {model} not supported for two-step rating")
+    except Exception as e:
+        _logger.warning(f"Error during 0-5 rating for model={model}: {e}")
+    return raw_judgment
+
+
+def format_judge_from_analyses(
+    question: str,
+    answer_a: list,
+    answer_b: list,
+    analysis_a: str,
+    analysis_b: str,
+    multi_turn: bool = False,
+) -> tuple[str | None, str]:
+    """Build system and user prompt for step 2: given candidates and analyses, output [[A]] or [[B]]."""
+    if multi_turn:
+        answer_a_text = (
+            f"### User:\n{question}\n\n### Assistant A:\n{answer_a[1]['content']}\n\n"
+            f"### User:\n{answer_a[2]['content']}\n\n### Assistant A:\n{answer_a[3]['content']}"
+        )
+        answer_b_text = (
+            f"### User:\n{question}\n\n### Assistant B:\n{answer_b[1]['content']}\n\n"
+            f"### User:\n{answer_b[2]['content']}\n\n### Assistant B:\n{answer_b[3]['content']}"
+        )
+    else:
+        answer_a_text = answer_a[1]["content"]
+        answer_b_text = answer_b[1]["content"]
+    user_prompt = template_two_step_verdict.format(
+        question=question,
+        answer_a=answer_a_text,
+        answer_b=answer_b_text,
+        analysis_a=analysis_a,
+        analysis_b=analysis_b,
+    )
+    return prompt_two_step_verdict, user_prompt
+
+
+def run_judge_two_step(
+    question: str,
+    answer_a: list,
+    answer_b: list,
+    model,
+    multi_turn: bool = False,
+    model_modifier: str | None = None,
+):
+    """
+    Two-step judge: (1) rate each candidate's answer(s) on 0-5 (raw analysis, no parsing);
+    (2) given candidates and both analyses, ask model to output [[A]] or [[B]].
+    Returns (winner, request_info, judgment) like run_judge_pair.
+    """
+    if isinstance(model, list):
+        raise NotImplementedError("Ensemble models are not supported for two-step judge.")
+
+    analysis_a = _get_single_rating_0_5(question, answer_a, model, multi_turn=multi_turn, model_modifier=model_modifier)
+    analysis_b = _get_single_rating_0_5(question, answer_b, model, multi_turn=multi_turn, model_modifier=model_modifier)
+
+    system_prompt, user_prompt = format_judge_from_analyses(
+        question, answer_a, answer_b, analysis_a, analysis_b, multi_turn=multi_turn
+    )
+
+    judgment = API_ERROR_OUTPUT
+    if model in OPENAI_MODEL_LIST:
+        if OpenAI is None or openai is None:
+            _missing_dep("openai", "install openai>=1.0")
+        else:
+            conv = get_conv_template("chatgpt")
+            conv.set_system_message(system_prompt)
+            conv.append_message(conv.roles[0], user_prompt)
+            conv.append_message(conv.roles[1], None)
+            judgment = chat_completion_openai(model, conv, temperature=0, max_tokens=2048)
+    elif model in ANTHROPIC_MODEL_LIST:
+        if anthropic is None:
+            _missing_dep("anthropic", "install anthropic>=0.21.3")
+        else:
+            conv = get_conv_template("claude")
+            conv.set_system_message(system_prompt)
+            conv.append_message(conv.roles[0], user_prompt)
+            conv.append_message(conv.roles[1], None)
+            conv.messages = conv.to_openai_api_messages()
+            judgment = chat_completion_anthropic(model, conv, temperature=0, max_tokens=1024)
+    elif model in GEMINI_MODEL_LIST:
+        if genai is None or HarmCategory is None or HarmBlockThreshold is None:
+            _missing_dep("google-generativeai", "install google-generativeai>=0.6.4")
+        else:
+            text = user_prompt if system_prompt is None else f"{system_prompt}\n\n{user_prompt}"
+            judgment = chat_completion_gemini(model, text, temperature=0, max_tokens=4096)
+    elif model in TOGETHER_MODEL_LIST:
+        if Together is None:
+            _missing_dep("together", "install together>=1.1.3")
+        else:
+            conv = get_conv_template("chatgpt")
+            conv.set_system_message(system_prompt)
+            conv.append_message(conv.roles[0], user_prompt)
+            conv.append_message(conv.roles[1], None)
+            judgment = chat_completion_together(model, conv, temperature=0, max_tokens=2048)
+    else:
+        _logger.warning(f"Model {model} not supported for two-step judge")
+
+    winner = process_judgement(judgment, None)  # default [[A]]/[[B]] parsing
+    request_info = {"analysis_a": analysis_a, "analysis_b": analysis_b, "step2_user_prompt": user_prompt}
+    return winner, request_info, judgment
+
+
+def process_judgement_four(judgment: str) -> str:
+    """Parse [[A]]/[[B]]/[[C]]/[[D]] from verdict (4-way). Returns A/B/C/D or 'error'."""
+    if "[[A]]" in judgment:
+        return "A"
+    if "[[B]]" in judgment:
+        return "B"
+    if "[[C]]" in judgment:
+        return "C"
+    if "[[D]]" in judgment:
+        return "D"
+    return "error"
+
+
+def format_judge_from_analyses_four(
+    question: str,
+    answer_a: list,
+    answer_b: list,
+    answer_c: list,
+    answer_d: list,
+    analysis_a: str,
+    analysis_b: str,
+    analysis_c: str,
+    analysis_d: str,
+    multi_turn: bool = False,
+) -> tuple[str | None, str]:
+    """Build system and user prompt for step 2 (4-way): given candidates and analyses, output [[A]]/[[B]]/[[C]]/[[D]]."""
+    # Use assistant response content; multi_turn not expanded here for 4-way (v2 data is typically 1 turn)
+    answer_a_text = answer_a[1]["content"]
+    answer_b_text = answer_b[1]["content"]
+    answer_c_text = answer_c[1]["content"]
+    answer_d_text = answer_d[1]["content"]
+    user_prompt = template_two_step_verdict_four.format(
+        question=question,
+        answer_a=answer_a_text,
+        answer_b=answer_b_text,
+        answer_c=answer_c_text,
+        answer_d=answer_d_text,
+        analysis_a=analysis_a,
+        analysis_b=analysis_b,
+        analysis_c=analysis_c,
+        analysis_d=analysis_d,
+    )
+    return prompt_two_step_verdict_four, user_prompt
+
+
+def run_judge_two_step_four(
+    question: str,
+    answer_a: list,
+    answer_b: list,
+    answer_c: list,
+    answer_d: list,
+    model,
+    multi_turn: bool = False,
+    model_modifier: str | None = None,
+):
+    """
+    Two-step judge (4-way): (1) rate each of A/B/C/D on 0-5 (raw analysis);
+    (2) given candidates and four analyses, ask model to output [[A]]/[[B]]/[[C]]/[[D]].
+    Returns (winner, request_info, judgment).
+    """
+    if isinstance(model, list):
+        raise NotImplementedError("Ensemble models are not supported for two-step judge.")
+
+    analysis_a = _get_single_rating_0_5(question, answer_a, model, multi_turn=multi_turn, model_modifier=model_modifier)
+    analysis_b = _get_single_rating_0_5(question, answer_b, model, multi_turn=multi_turn, model_modifier=model_modifier)
+    analysis_c = _get_single_rating_0_5(question, answer_c, model, multi_turn=multi_turn, model_modifier=model_modifier)
+    analysis_d = _get_single_rating_0_5(question, answer_d, model, multi_turn=multi_turn, model_modifier=model_modifier)
+
+    system_prompt, user_prompt = format_judge_from_analyses_four(
+        question, answer_a, answer_b, answer_c, answer_d,
+        analysis_a, analysis_b, analysis_c, analysis_d,
+        multi_turn=multi_turn,
+    )
+
+    judgment = API_ERROR_OUTPUT
+    if model in OPENAI_MODEL_LIST:
+        if OpenAI is None or openai is None:
+            _missing_dep("openai", "install openai>=1.0")
+        else:
+            conv = get_conv_template("chatgpt")
+            conv.set_system_message(system_prompt)
+            conv.append_message(conv.roles[0], user_prompt)
+            conv.append_message(conv.roles[1], None)
+            judgment = chat_completion_openai(model, conv, temperature=0, max_tokens=2048)
+    elif model in ANTHROPIC_MODEL_LIST:
+        if anthropic is None:
+            _missing_dep("anthropic", "install anthropic>=0.21.3")
+        else:
+            conv = get_conv_template("claude")
+            conv.set_system_message(system_prompt)
+            conv.append_message(conv.roles[0], user_prompt)
+            conv.append_message(conv.roles[1], None)
+            conv.messages = conv.to_openai_api_messages()
+            judgment = chat_completion_anthropic(model, conv, temperature=0, max_tokens=1024)
+    elif model in GEMINI_MODEL_LIST:
+        if genai is None or HarmCategory is None or HarmBlockThreshold is None:
+            _missing_dep("google-generativeai", "install google-generativeai>=0.6.4")
+        else:
+            text = user_prompt if system_prompt is None else f"{system_prompt}\n\n{user_prompt}"
+            judgment = chat_completion_gemini(model, text, temperature=0, max_tokens=4096)
+    elif model in TOGETHER_MODEL_LIST:
+        if Together is None:
+            _missing_dep("together", "install together>=1.1.3")
+        else:
+            conv = get_conv_template("chatgpt")
+            conv.set_system_message(system_prompt)
+            conv.append_message(conv.roles[0], user_prompt)
+            conv.append_message(conv.roles[1], None)
+            judgment = chat_completion_together(model, conv, temperature=0, max_tokens=2048)
+    else:
+        _logger.warning(f"Model {model} not supported for two-step judge")
+
+    winner = process_judgement_four(judgment)
+    request_info = {
+        "analysis_a": analysis_a, "analysis_b": analysis_b,
+        "analysis_c": analysis_c, "analysis_d": analysis_d,
+        "step2_user_prompt": user_prompt,
+    }
+    return winner, request_info, judgment
 
 
 # also uses ArenaHard code
