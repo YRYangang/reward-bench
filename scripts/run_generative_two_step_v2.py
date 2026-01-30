@@ -93,6 +93,7 @@ def main():
             trust_remote_code=args.trust_remote_code,
             tensor_parallel_size=args.num_gpus,
             gpu_memory_utilization=args.vllm_gpu_util,
+            disable_custom_all_reduce=True,
         )
         tokenizer = AutoTokenizer.from_pretrained(args.model)
         stop_token_ids = [128009] if ("Llama-3" in args.model or "llama3-8b" in args.model) and "3.1" not in args.model else None

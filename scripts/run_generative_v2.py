@@ -107,6 +107,7 @@ def main():
             trust_remote_code=args.trust_remote_code,
             tensor_parallel_size=args.num_gpus,
             gpu_memory_utilization=args.vllm_gpu_util,
+            disable_custom_all_reduce=True,
             # max_seq_length=args.vllm_max_seq_length,
         )
         tokenizer = AutoTokenizer.from_pretrained(args.model)
