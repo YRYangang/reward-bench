@@ -57,6 +57,12 @@ if HF_TOKEN is not None:
 def get_args():
     parser = argparse.ArgumentParser()
     add_common_generative_args(parser, dataset=False, score_w_ratings=False)
+    parser.add_argument(
+        "--step1-thinking-only",
+        action="store_true",
+        default=False,
+        help="Only use thinking for step 1.",
+    )
     return parser.parse_args()
 
 
@@ -115,13 +121,24 @@ def main():
         else:
             stop_token_ids = None
 
-        sampling_params = SamplingParams(
+        default_sampling_params = SamplingParams(
             n=1,
             temperature=0,
             top_p=1,
             max_tokens=2048,
             stop_token_ids=stop_token_ids,
         )
+        sampling_params_step1 = default_sampling_params
+        if args.enable_thinking and args.step1_thinking_only:
+            eot_token_id = tokenizer.convert_tokens_to_ids("</think>")
+            stop_token_ids = [eot_token_id]
+            sampling_params_step1 = SamplingParams(
+                n=1,
+                temperature=0,
+                top_p=1,
+                max_tokens=2048,
+                stop_token_ids=stop_token_ids,
+            )
 
     # Two-step uses default [[A]]/[[B]] parsing; no model-specific modifier
     model_modifier = None
@@ -237,7 +254,7 @@ def main():
                     messages, tokenize=False, add_generation_prompt=True
                 )
 
-        def _batch_generate(prompts_list):
+        def _batch_generate(prompts_list, sampling_params):
             """Run one batched generate; prompts_list is list of prompt strings."""
             if model_modifier == "Atla":
                 prompt_token_ids = [
@@ -275,7 +292,7 @@ def main():
             get_rating_0_5_user_prompt(r["prompt"], r["answer_a"], r["mult_turn"]) for r in rows
         ]
         prompts_a_full = [_messages_to_prompt("", u) for u in prompts_rating_a]
-        analyses_a = _batch_generate(prompts_a_full)
+        analyses_a = _batch_generate(prompts_a_full, sampling_params_step1)
 
         # Pass 2: batch rate assistant B (0–5) for all examples
         logger.info("*** Run inference: pass 2/3 (rate B) ***")
@@ -283,7 +300,7 @@ def main():
             get_rating_0_5_user_prompt(r["prompt"], r["answer_b"], r["mult_turn"]) for r in rows
         ]
         prompts_b_full = [_messages_to_prompt("", u) for u in prompts_rating_b]
-        analyses_b = _batch_generate(prompts_b_full)
+        analyses_b = _batch_generate(prompts_b_full, sampling_params_step1)
 
         # Pass 3: batch step-2 verdict ([[A]] / [[B]]) using analyses
         logger.info("*** Run inference: pass 3/3 (verdict) ***")
@@ -293,7 +310,7 @@ def main():
                 r["prompt"], r["answer_a"], r["answer_b"], ana_a, ana_b, r["mult_turn"]
             )
             step2_prompts.append(_messages_to_prompt(sys_s or "", user_s))
-        judgments = _batch_generate(step2_prompts)
+        judgments = _batch_generate(step2_prompts, default_sampling_params)
 
         def process_shuffled(win, shuffle):
             winner_text = "B" if shuffle else "A"

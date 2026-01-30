@@ -58,6 +58,12 @@ if HF_TOKEN is not None:
 def get_args():
     parser = argparse.ArgumentParser()
     add_common_generative_args(parser, dataset=True, score_w_ratings=False)
+    parser.add_argument(
+        "--step1-thinking-only",
+        action="store_true",
+        default=False,
+        help="Only use thinking for step 1.",
+    )
     return parser.parse_args()
 
 
@@ -97,7 +103,14 @@ def main():
         )
         tokenizer = AutoTokenizer.from_pretrained(args.model)
         stop_token_ids = [128009] if ("Llama-3" in args.model or "llama3-8b" in args.model) and "3.1" not in args.model else None
-        sampling_params = SamplingParams(n=1, temperature=0, top_p=1, max_tokens=2048, stop_token_ids=stop_token_ids)
+        
+        default_sampling_params = SamplingParams(n=1, temperature=0, top_p=1, max_tokens=2048, stop_token_ids=stop_token_ids)
+
+        sampling_params_step1 = default_sampling_params
+        if args.enable_thinking and args.step1_thinking_only:
+            eot_token_id = tokenizer.convert_tokens_to_ids("</think>")
+            stop_token_ids = [eot_token_id]
+            sampling_params_step1 = SamplingParams(n=1, temperature=0, top_p=1, max_tokens=2048, stop_token_ids=stop_token_ids)
 
     ############################
     # Load dataset (RB2: Ties + non-Ties)
@@ -214,7 +227,7 @@ def main():
             except TypeError:
                 return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
-        def _batch_generate(prompts_list):
+        def _batch_generate(prompts_list, sampling_params):
             if model_modifier == "Atla":
                 prompt_token_ids = [tokenizer(p, add_special_tokens=False)["input_ids"] for p in prompts_list]
                 outputs = model.generate(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
@@ -250,7 +263,7 @@ def main():
             for key in ("answer_a", "answer_b", "answer_c", "answer_d"):
                 u = get_rating_0_5_user_prompt(r["prompt"], r[key], r["mult_turn"])
                 all_rating_prompts.append(_messages_to_prompt("", u))
-        all_analyses = _batch_generate(all_rating_prompts)
+        all_analyses = _batch_generate(all_rating_prompts, sampling_params_step1)
         n = len(rows)
         analyses_a = [all_analyses[i * 4 + 0] for i in range(n)]
         analyses_b = [all_analyses[i * 4 + 1] for i in range(n)]
@@ -266,7 +279,7 @@ def main():
                 ana_a, ana_b, ana_c, ana_d, r["mult_turn"],
             )
             step2_prompts.append(_messages_to_prompt(sys_s or "", user_s))
-        judgments = _batch_generate(step2_prompts)
+        judgments = _batch_generate(step2_prompts, default_sampling_params)
 
         def process_shuffled(win, shuffle_option):
             options = ["A", "B", "C", "D"]
@@ -297,17 +310,23 @@ def main():
         vllm_model_dict = {
             "model": model,
             "tokenizer": tokenizer,
-            "sampling_params": sampling_params,
+            "sampling_params": default_sampling_params,
             "chat_template": get_conv_template(args.chat_template) if args.chat_template else None,
         }
         logger.info("*** Run inference on Ties subset (ratings) ***")
         ties_dataset_formatted = ties_dataset.map(format_ratings)
         results_ties = []
-        for batch in ties_dataset_formatted:
+        for batch_idx, batch in enumerate(ties_dataset_formatted):
             prompt = batch["prompt"]
             mult_turn = batch["mult_turn"]
             ratings = []
-            for answer_text in batch["answers"]:
+            for ans_idx, answer_text in enumerate(batch["answers"]):
+                if (prompt or "").strip() == "" or (answer_text or "").strip() == "":
+                    logger.warning(
+                        f"Ties batch {batch_idx} answer {ans_idx}: empty prompt or answer, skipping vLLM call (rating=-1)"
+                    )
+                    ratings.append(-1)
+                    continue
                 rating, _ = get_single_rating(
                     question_text=prompt,
                     answer_text=answer_text,
