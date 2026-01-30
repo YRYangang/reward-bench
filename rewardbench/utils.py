@@ -102,6 +102,7 @@ def save_to_hub(
     local_only: bool = False,
     best_of_n: bool = False,
     save_metrics_for_beaker: bool = False,
+    save_postfix: str = "",
 ):
     """
     Utility for saving results in dict to the hub in programatic organization.
@@ -114,11 +115,13 @@ def save_to_hub(
         local_only: if True, do not save to HF (for most non-AI2 users).
         best_of_n: if True, save to version 2 dataset results repo on HF.
         save_metrics_for_beaker: if True, save metrics for AI2 beaker visualization.
+        save_postfix: postfix to add to the save path (e.g. "_two_step" -> model_name_two_step.json).
 
     Returns:
         scores_url: URL to the saved scores (optional).
     """
-    scores_path = f"./results/{target_path}{model_name}.json"
+    save_name = model_name + save_postfix if save_postfix else model_name
+    scores_path = f"./results/{target_path}{save_name}.json"
 
     if save_metrics_for_beaker:
         # ai2 internal visualization, not needed externally, global path intentional.
@@ -147,7 +150,7 @@ def save_to_hub(
     if not local_only and not debug:
         scores_url = api.upload_file(
             path_or_fileobj=scores_path,
-            path_in_repo=target_path + f"{model_name}.json",
+            path_in_repo=target_path + f"{save_name}.json",
             repo_id=EVAL_REPO if not best_of_n else EVAL_REPO_V2,  # push to correct results repo
             repo_type="dataset",
             commit_message=f"Add chosen-rejected text with scores for  model {model_name}",

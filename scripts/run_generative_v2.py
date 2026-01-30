@@ -34,6 +34,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
 from rewardbench import load_eval_dataset_multi, process_single_model, save_to_hub
+from rewardbench.script_args import add_common_generative_args
 from rewardbench.generative_v2 import (
     ANTHROPIC_MODEL_LIST,
     API_MODEL_LIST,
@@ -56,52 +57,9 @@ if HF_TOKEN is not None:
 
 
 def get_args():
-    """
-    Parse arguments strings model and chat_template
-    """
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model",
-        type=str,
-        nargs="+",  # allow list of models (ensemble)
-        required=True,
-        help="name of OpenAI model to use (TODO add more providers/models)",
-    )
-    parser.add_argument("--dataset", type=str, default="allenai/reward-bench-2", help="path to huggingface dataset")
-    parser.add_argument("--chat_template", type=str, default=None, help="fastchat chat template (optional)")
-    parser.add_argument(
-        "--trust_remote_code", action="store_true", default=False, help="directly load model instead of pipeline"
-    )
-    parser.add_argument(
-        "--score_w_ratings", action="store_true", default=False, help="score with ratings instead of pairwise ranking"
-    )
-    parser.add_argument("--num_gpus", type=int, default=1, help="number of gpus to use, for multi-node vllm")
-    parser.add_argument("--vllm_gpu_util", type=float, default=0.9, help="gpu utilization for vllm")
-    # parser.add_argument("--vllm_max_seq_length", type=int, default=None, help="max sequence length for vllm")
-    parser.add_argument("--do_not_save", action="store_true", help="do not save results to hub (for debugging)")
-    parser.add_argument(
-        "--pref_sets", action="store_true", help="run on common preference sets instead of our custom eval set"
-    )
-    parser.add_argument(
-        "--debug", action="store_true", help="run on common preference sets instead of our custom eval set"
-    )
-    parser.add_argument(
-        "--num_threads", type=int, default=10, help="number of threads to use for parallel processing of examples"
-    )
-    parser.add_argument(
-        "--disable_beaker_save", action="store_true", help="disable saving the main results in a file for AI2 Beaker"
-    )
-    parser.add_argument(
-        "--force_local", action="store_true", default=False, help="force local run, even if model is on Together API"
-    )
-    parser.add_argument(
-        "--enable-thinking",
-        action="store_true",
-        default=False,
-        help="Pass enable_thinking=True to tokenizer.apply_chat_template (if supported by the tokenizer).",
-    )
-    args = parser.parse_args()
-    return args
+    add_common_generative_args(parser, dataset=True, score_w_ratings=True)
+    return parser.parse_args()
 
 
 def main():
@@ -687,6 +645,7 @@ def main():
         local_only=args.do_not_save,
         save_metrics_for_beaker=not args.disable_beaker_save,
         best_of_n=True,
+        save_postfix=getattr(args, "save_postfix", ""),
     )
     if not args.do_not_save:
         logger.info(f"Uploaded reward model results to {results_url}")
@@ -703,7 +662,8 @@ def main():
 
     sub_path_scores = "eval-set-scores/"
     scores_url = save_to_hub(
-        scores_dict, model_name, sub_path_scores, args.debug, local_only=args.do_not_save, best_of_n=True
+        scores_dict, model_name, sub_path_scores, args.debug, local_only=args.do_not_save, best_of_n=True,
+        save_postfix=getattr(args, "save_postfix", ""),
     )
 
     logger.info(f"Uploading chosen-rejected text with scores to {scores_url}")
