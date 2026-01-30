@@ -500,12 +500,9 @@ def _get_vllm_rating(user_prompt: str, system_prompt: str, vllm_model, model_mod
 
             prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
-        # Tokenize without adding special tokens to avoid duplication
-        tokenized_prompt = tokenizer(prompt, add_special_tokens=False, return_length=True)
-        prompt_ids = tokenized_prompt["input_ids"]
-
-        # Generate response using token IDs
-        outputs = model.generate(prompt_token_ids=[prompt_ids], sampling_params=sampling_params)
+        # Generate using prompt string.
+        # Passing prompts avoids prompt_token_ids, which some vLLM versions do not support.
+        outputs = model.generate([prompt], sampling_params=sampling_params)
         raw_judgment = outputs[0].outputs[0].text.strip()
 
         return raw_judgment
