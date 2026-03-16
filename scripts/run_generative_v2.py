@@ -33,7 +33,7 @@ from fastchat.conversation import get_conv_template
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
-from rewardbench import load_eval_dataset_multi, process_single_model, save_to_hub
+from rewardbench.utils import load_eval_dataset_multi, process_single_model, save_to_hub
 from rewardbench.script_args import add_common_generative_args
 from rewardbench.generative_v2 import (
     ANTHROPIC_MODEL_LIST,
@@ -42,7 +42,6 @@ from rewardbench.generative_v2 import (
     OPENAI_MODEL_LIST,
     format_judge_answers,
     get_rating_user_prompts,
-    get_single_rating,
     get_ties_rating_user_prompts,
     parse_rating_from_judgment,
     process_judgement,
@@ -265,7 +264,12 @@ def main():
                 batch["texts_chosen"].extend(batch["texts_rejected"])
                 answers = batch["texts_chosen"]
                 winners, requests, judgements = run_judge_ratings_multi(
-                    prompt, answers, args.model, multi_turn=mult_turn, model_modifier=model_modifier, is_ties=is_ties
+                    prompt,
+                    answers,
+                    args.model,
+                    multi_turn=mult_turn,
+                    model_modifier=model_modifier,
+                    is_ties=is_ties,
                 )
 
                 if debug:
@@ -359,7 +363,10 @@ def main():
             ]
             try:
                 return tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True, enable_thinking=args.enable_thinking,
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=args.enable_thinking,
                 )
             except TypeError:
                 return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -396,7 +403,13 @@ def main():
                 answer_a, answer_d = answer_d, answer_a
 
             system_prompt, user_prompt = format_judge_answers(
-                prompt, answer_a, answer_b, answer_c, answer_d, multi_turn=mult_turn, model_modifier=model_modifier
+                prompt,
+                answer_a,
+                answer_b,
+                answer_c,
+                answer_d,
+                multi_turn=mult_turn,
+                model_modifier=model_modifier,
             )
 
             if optional_chat_template is not None:
@@ -422,7 +435,9 @@ def main():
                     )
                 except TypeError:
                     # Older tokenizers / Transformers may not support `enable_thinking`.
-                    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                    prompt = tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
+                    )
                 # chat template already include special tokens
                 # when vllm runs model.generate on prompts, the tokenizer is applied to the prompts
                 # defaulting to add_special_tokens=True - this will end up duplicating the special tokens
@@ -453,107 +468,6 @@ def main():
             batch["answers"] = formatted_answers
             batch["mult_turn"] = mult_turn
             return batch
-
-        def get_vllm_judgement(batch, is_ties=False):
-            """Get judgement using VLLM model"""
-            if not args.score_w_ratings and not is_ties:
-                # Direct 4-way comparison (existing logic)
-                mult_turn = batch["mult_turn"] if "mult_turn" in batch else (len(batch["texts_chosen"]) > 2)
-                prompt = batch["texts_chosen"][0][0]["content"]
-
-                # Get 4 answers and shuffle
-                answer_a = batch["texts_chosen"]
-                answer_b = batch["texts_rejected"][0]
-                answer_c = batch["texts_rejected"][1]
-                answer_d = batch["texts_rejected"][2]
-
-                shuffle_option = np.random.randint(0, 4)
-                if shuffle_option == 0:
-                    winner_text = "A"
-                    loser_texts = ["B", "C", "D"]
-                elif shuffle_option == 1:
-                    answer_a, answer_b = answer_b, answer_a
-                    winner_text = "B"
-                    loser_texts = ["A", "C", "D"]
-                elif shuffle_option == 2:
-                    answer_a, answer_c = answer_c, answer_a
-                    winner_text = "C"
-                    loser_texts = ["A", "B", "D"]
-                elif shuffle_option == 3:
-                    answer_a, answer_d = answer_d, answer_a
-                    winner_text = "D"
-                    loser_texts = ["A", "B", "C"]
-
-                # Format prompt for 4-way comparison
-                system_prompt, user_prompt = format_judge_answers(
-                    prompt, answer_a, answer_b, answer_c, answer_d, multi_turn=mult_turn, model_modifier=model_modifier
-                )
-
-                # Generate with VLLM
-                messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
-                try:
-                    formatted_prompt = tokenizer.apply_chat_template(
-                        messages,
-                        tokenize=False,
-                        add_generation_prompt=True,
-                        enable_thinking=args.enable_thinking,
-                    )
-                except TypeError:
-                    # Older tokenizers / Transformers may not support `enable_thinking`.
-                    formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-                outputs = model.generate([formatted_prompt], sampling_params=sampling_params)
-                judgement = outputs[0].outputs[0].text.strip()
-
-                winner = process_judgement(judgement, model_modifier)
-
-                if winner == winner_text:
-                    return 1
-                elif winner in loser_texts:
-                    return 0
-                else:
-                    return 0.25
-
-            else:
-                # Ratings-based evaluation
-                prompt = batch["prompt"] if "prompt" in batch else batch["texts_chosen"][0][0]["content"]
-                mult_turn = batch["mult_turn"] if "mult_turn" in batch else (len(batch["texts_chosen"]) > 2)
-
-                # Prepare all answers
-                if "answers" in batch:
-                    all_answers_text = batch["answers"]
-                else:
-                    all_answers = [batch["texts_chosen"]] + batch["texts_rejected"]
-                    all_answers_text = [ans[1]["content"] for ans in all_answers]
-
-                # Get ratings for each answer
-                ratings = []
-                for answer_text in all_answers_text:
-                    rating, _ = get_single_rating(
-                        question_text=prompt,
-                        answer_text=answer_text,
-                        model=args.model,
-                        model_modifier=model_modifier,
-                        is_ties=is_ties,
-                        vllm_model=vllm_model_dict,
-                    )
-                    ratings.append(rating)
-
-                if is_ties:
-                    return ratings
-
-                # Find winners (non-ties case)
-                valid_ratings = [r for r in ratings if r != -1]
-                if not valid_ratings:
-                    return 0.25
-
-                max_rating = max(valid_ratings)
-                winners = [i for i, r in enumerate(ratings) if r == max_rating]
-
-                if args.debug:
-                    logger.info(f"Raw judgment: {valid_ratings}")
-
-                # Return score based on whether first answer (chosen) is among winners
-                return (0 in winners) / len(winners)
 
         # Choose processing method based on scoring approach
         if args.score_w_ratings:
@@ -624,7 +538,9 @@ def main():
                 chat_template = get_conv_template(args.chat_template)
             else:
                 chat_template = None
-            dataset_prompts = dataset.map(format_judgements, fn_kwargs={"optional_chat_template": chat_template})
+            dataset_prompts = dataset.map(
+                format_judgements, fn_kwargs={"optional_chat_template": chat_template}
+            )
 
             # Generate judgements
             prompts = dataset_prompts["text"]
@@ -762,7 +678,12 @@ def main():
 
     sub_path_scores = "eval-set-scores/"
     scores_url = save_to_hub(
-        scores_dict, model_name, sub_path_scores, args.debug, local_only=args.do_not_save, best_of_n=True,
+        scores_dict,
+        model_name,
+        sub_path_scores,
+        args.debug,
+        local_only=args.do_not_save,
+        best_of_n=True,
         save_postfix=getattr(args, "save_postfix", ""),
     )
 

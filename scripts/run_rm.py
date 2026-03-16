@@ -35,6 +35,7 @@ from rewardbench import (
 )
 from rewardbench.constants import EXAMPLE_COUNTS, SUBSET_MAPPING
 from rewardbench.utils import calculate_scores_per_section
+from rewardbench.script_args import add_common_generative_args
 
 # Enable TensorFloat32 (TF32) tensor cores on Ampere GPUs for matrix multiplications (faster than FP32)
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -54,26 +55,23 @@ def get_args():
     Parse arguments strings model and chat_template
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, required=True, help="path to model")
-    parser.add_argument("--tokenizer", type=str, default=None, help="path to non-matching tokenizer to model")
-    parser.add_argument("--chat_template", type=str, default="tulu", help="path to chat template")
+    add_common_generative_args(parser, dataset=True, score_w_ratings=True)
     parser.add_argument(
-        "--trust_remote_code", action="store_true", default=False, help="directly load model instead of pipeline"
-    )
-    parser.add_argument("--do_not_save", action="store_true", help="do not save results to hub (for debugging)")
-    parser.add_argument("--batch_size", type=int, default=64, help="batch size for inference")
-    parser.add_argument("--max_length", type=int, default=2048, help="Max length of RM inputs (passed to pipeline)")
-    parser.add_argument(
-        "--pref_sets", action="store_true", help="run on common preference sets instead of our custom eval set"
+        "--batch_size",
+        type=int,
+        default=64,
+        help="batch size for inference",
     )
     parser.add_argument(
-        "--debug", action="store_true", help="run on common preference sets instead of our custom eval set"
+        "--max_length",
+        type=int,
+        default=2048,
+        help="Max length of RM inputs (passed to pipeline)",
     )
     parser.add_argument(
-        "--disable_beaker_save", action="store_true", help="disable saving the main results in a file for AI2 Beaker"
-    )
-    parser.add_argument(
-        "--not_quantized", action="store_true", help="disable quantization for models that are quantized by default"
+        "--not_quantized",
+        action="store_true",
+        help="disable quantization for models that are quantized by default",
     )
     parser.add_argument(
         "--torch_dtype",
@@ -96,6 +94,11 @@ def get_args():
 
 def main():
     args = get_args()
+    # --model has nargs="+" in common args; normalize to single path for this script
+    if isinstance(args.model, list):
+        if len(args.model) != 1:
+            raise ValueError("run_rm.py expects a single model path; got multiple.")
+        args.model = args.model[0]
     ###############
     # Setup logging
     ###############
@@ -114,13 +117,17 @@ def main():
     transformers.utils.logging.enable_default_handler()
     transformers.utils.logging.enable_explicit_format()
 
-    logger.info(f"Running reward model on {args.model} with chat template {args.chat_template}")
+    logger.info(f"Running reward model on {args.model}")
     if args.trust_remote_code:
         logger.info("Loading model with Trust Remote Code")
 
     # load chat template
-    chat_template = args.chat_template
-    conv = get_conv_template(chat_template)
+    if args.chat_template is not None:
+        logger.info(f"Loading chat template {args.chat_template}")
+        conv = get_conv_template(args.chat_template)
+    else:
+        logger.info("No chat template provided, using default")
+        conv = None
 
     if args.model in REWARD_MODEL_CONFIG:
         config = REWARD_MODEL_CONFIG[args.model]
@@ -146,7 +153,9 @@ def main():
         or args.not_quantized
     ):
         quantized = False
-        logger.info(f"Disabling quantization for llama-3 or override flag (--not_quantized: {args.not_quantized})")
+        logger.info(
+            f"Disabling quantization for llama-3 or override flag (--not_quantized: {args.not_quantized})"
+        )
 
     custom_dialogue = config["custom_dialogue"]
     model_type = config["model_type"]
@@ -169,8 +178,7 @@ def main():
     # Load dataset
     ############################
     logger.info("*** Load dataset ***")
-    tokenizer_path = args.tokenizer if args.tokenizer else args.model
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=args.trust_remote_code)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
     if not custom_dialogue:  # not needed for PairRM / SteamSHP
         tokenizer.truncation_side = "left"  # copied from Starling, but few samples are above context length
     dataset, subsets = load_eval_dataset(
@@ -296,7 +304,6 @@ def main():
         scores_chosen = []
         scores_rejected = []
         for step, batch in enumerate(tqdm(dataloader, desc="RM batch steps")):
-            logger.info(f"RM inference step {step}/{len(dataloader)}")
 
             if model_type == "Custom Classifier":
                 text_rejected = [b["text_rejected"] for b in batch]
@@ -315,6 +322,10 @@ def main():
                 if isinstance(rewards_chosen[0], dict):
                     score_chosen_batch = [result["score"] for result in rewards_chosen]
                     score_rejected_batch = [result["score"] for result in rewards_rejected]
+                    if isinstance(score_rejected_batch[0], torch.Tensor):
+                        score_rejected_batch = torch.cat(score_rejected_batch)
+                    else:
+                        score_rejected_batch = torch.tensor(score_rejected_batch)
                 # for classes that directly output scores (custom code)
                 else:
                     score_chosen_batch = (
@@ -377,6 +388,7 @@ def main():
         args.debug,
         local_only=args.do_not_save,
         save_metrics_for_beaker=not args.disable_beaker_save,
+        save_postfix=getattr(args, "save_postfix", ""),
     )
     if not args.do_not_save:
         logger.info(f"Uploaded reward model results to {results_url}")
@@ -391,7 +403,14 @@ def main():
 
         sub_path_scores = "eval-set-scores/" if not args.pref_sets else "pref-sets-scores/"
 
-        scores_url = save_to_hub(scores_dict, args.model, sub_path_scores, args.debug, local_only=args.do_not_save)
+        scores_url = save_to_hub(
+            scores_dict,
+            args.model,
+            sub_path_scores,
+            args.debug,
+            local_only=args.do_not_save,
+            save_postfix=getattr(args, "save_postfix", ""),
+        )
         logger.info(f"Uploading chosen-rejected text with scores to {scores_url}")
     else:
         logger.info("Not uploading chosen-rejected text with scores due to model compatibility")
