@@ -29,8 +29,13 @@ from functools import partial
 
 import numpy as np
 from datasets import concatenate_datasets
-from fastchat.conversation import get_conv_template
 from transformers import AutoTokenizer
+
+# fschat is optional - only needed if --chat_template is specified
+try:
+    from fastchat.conversation import get_conv_template
+except ImportError:
+    get_conv_template = None
 from vllm import LLM, SamplingParams
 
 from rewardbench.utils import load_eval_dataset_multi, process_single_model, save_to_hub
@@ -152,7 +157,7 @@ def main():
     dataset = load_eval_dataset_multi(
         core_set=not args.pref_sets,
         dataset=args.dataset,
-        conv=get_conv_template("raw"),  # not used in this script (handled later)
+        conv=get_conv_template("raw") if get_conv_template else None,  # not used in this script (handled later)
         custom_dialogue_formatting=True,  # handle formatting later
         tokenizer=None,
         logger=logger,
@@ -338,6 +343,12 @@ def main():
         # Prepare vllm_model dict for ratings functions
         # At the top of the VLLM section:
         if args.chat_template is not None:
+            if get_conv_template is None:
+                raise ImportError(
+                    "--chat_template requires fschat, which is unmaintained. "
+                    "Consider using the model's built-in tokenizer chat template instead (omit --chat_template). "
+                    "If you need legacy templates, install with: pip install rewardbench[v1]"
+                )
             chat_template = get_conv_template(args.chat_template)
         else:
             chat_template = None
@@ -426,6 +437,8 @@ def main():
                     },
                     {"role": "user", "content": user_prompt},
                 ]
+                if args.no_system_prompt:
+                    messages.pop(0)
                 try:
                     prompt = tokenizer.apply_chat_template(
                         messages,
@@ -535,6 +548,12 @@ def main():
             # Process non-ties dataset with 4-way comparison
             logger.info("*** Run inference on non-ties subsets with 4-way comparison ***")
             if args.chat_template is not None:
+                if get_conv_template is None:
+                    raise ImportError(
+                        "--chat_template requires fschat, which is unmaintained. "
+                        "Consider using the model's built-in tokenizer chat template instead (omit --chat_template). "
+                        "If you need legacy templates, install with: pip install rewardbench[v1]"
+                    )
                 chat_template = get_conv_template(args.chat_template)
             else:
                 chat_template = None

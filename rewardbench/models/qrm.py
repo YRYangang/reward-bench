@@ -7,6 +7,12 @@ import torch.nn.functional as F
 from transformers import LlamaModel, LlamaPreTrainedModel
 from transformers.utils import ModelOutput
 
+try:
+    from transformers.models.llama.modeling_llama import LLAMA_INPUTS_DOCSTRING
+except ImportError:
+    # LLAMA_INPUTS_DOCSTRING was removed in transformers >= 4.56
+    LLAMA_INPUTS_DOCSTRING = ""
+
 
 class GatingNetwork(nn.Module):
     def __init__(

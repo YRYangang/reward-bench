@@ -41,12 +41,33 @@ The three primary scripts to generate results (more in `scripts/`):
 3. `scripts/run_v2.py`: Run evaluations for RewardBench 2, with special data handling for best-of-4 and Ties data.
 
 ## Quick Usage
-RewardBench lets you quickly evaluate any reward model on any preference set. 
+RewardBench lets you quickly evaluate any reward model on any preference set.
 It also will detect if a instruction dataset is passed (by checking for not having `chosen`/`rejected`, and having `messages`) -- for these, just a model outputs are logged (not accuracy).
 
-To install for quick usage, install with pip as:
+### Installation
+
+**With UV (recommended):**
+```bash
+uv pip install rewardbench
+
+# For generative models (LLM-as-judge, vLLM, API providers)
+uv pip install rewardbench[generative]
 ```
+
+**With pip:**
+```bash
 pip install rewardbench
+
+# For generative models
+pip install rewardbench[generative]
+```
+
+**For development:**
+```bash
+git clone https://github.com/allenai/reward-bench.git
+cd reward-bench
+uv sync                      # base install
+uv sync --extra generative   # with generative support
 ```
 **To run RewardBench 2, you can run the following command, substituting the model you would like to run and adding any additional model-specific parameters, which can be found in the [eval configs](https://github.com/allenai/reward-bench/blob/main/scripts/configs/eval_configs.yaml) in `scripts/configs/eval_configs.yaml`**
 ```
@@ -80,16 +101,12 @@ rewardbench --model=OpenAssistant/reward-model-deberta-v3-large-v2 --dataset=all
 rewardbench --model=Qwen/Qwen1.5-0.5B-Chat --ref_model=Qwen/Qwen1.5-0.5B --dataset=/net/nfs.cirrascale/allennlp/jacobm/herm/data/berkeley-nectar-binarized-preferences-random-rejected.jsonl --load_json
 ```
 
-*Experimental*: Generative RMs can be run from the pip install by running:
-```
-pip install rewardbench[generative]
-```
-And then:
+**Generative RMs** can be run after installing with `[generative]` extra (see Installation above):
 ```
 rewardbench-gen --model={}
 ```
-For more information, see `scripts/run_generative.py`. 
-The extra requirement for local models is VLLM and the requesite API for API models (OpenAI, Anthropic, and Together are supported).
+For more information, see `scripts/run_generative.py`.
+Local models require vLLM. API models support OpenAI, Anthropic, Google Gemini, and Together.
 
 ### Logging
 
@@ -275,24 +292,29 @@ print(scores_per_section)
 
 This section is designed for AI2 usage, but may help others evaluating models with Docker.
 
-### Updating the docker image 
+### Docker Images
 
-When updating this repo, the docker image should be rebuilt to include those changes. 
-For AI2 members, please update the list below with any images you use regularly.
-For example, if you update `scripts/run_rm.py` and include a new package (or change a package version), you should rebuild the image and verify it still works on known models.
+Two Docker images are available:
 
-To update the image, run these commands in the root directory of this repo:
-1. `docker build -t <local_image_name> . --platform linux/amd64`
-2. `beaker image create <local_image_name> -n <beaker_image_name>`
+| Image | Dockerfile | Use Case | Build Time |
+|-------|------------|----------|------------|
+| `rewardbench` | `Dockerfile` | Reward models, API-based LLM judges | ~5-10 min |
+| `rewardbench-vllm` | `Dockerfile.vllm` | Local LLM inference via vLLM | ~45 min |
 
-Notes: Do not use the character - in image names for beaker,
+The base image uses torch ≤2.8 with prebuilt flash-attn wheels. The vllm image uses torch 2.9 (required by vllm) and builds flash-attn from source.
 
-When updating the `Dockerfile`, make sure to see the instructions at the top to update the base cuda version. 
+To build locally:
+```bash
+# Base image (fast)
+docker build -t rewardbench . --platform linux/amd64
 
-We recently switched to automatic beaker image building workflows. 
-You can use this image, or the last image with the previous Dockerfile
-- `nathanl/rewardbench_auto`: Automatic image [here](https://beaker.org/im/01J60RQ6Y1KGNAD0NEPK01K03T/details).
-- `nathanl/rb_v23`, Jul. 2024: Include support for bfloat16 models from command line
+# vLLM image (slow, includes local LLM inference)
+docker build -f Dockerfile.vllm -t rewardbench-vllm . --platform linux/amd64
+```
+
+Images are automatically built and pushed to Beaker on merge to main:
+- `nathanl/rewardbench_auto`: Base image
+- `nathanl/rewardbench_vllm_auto`: vLLM image
 
 ## Citation
 Please cite our work with the following:

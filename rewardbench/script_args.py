@@ -115,6 +115,12 @@ def add_common_generative_args(
         help="Pass enable_thinking=True to tokenizer.apply_chat_template (if supported).",
     )
     parser.add_argument(
+        "--no-system-prompt",
+        action="store_true",
+        default=False,
+        help="do not add system prompt to the model",
+    )
+    parser.add_argument(
         "--save-postfix",
         type=str,
         default="",

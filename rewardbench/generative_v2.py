@@ -16,7 +16,7 @@
 # pip install openai>=1.0
 # pip install anthropic>=0.21.3
 # pip install together>=1.1.3
-# pip install google-generativeai>=0.6.4
+# pip install google-genai
 
 import os
 import re
@@ -65,6 +65,15 @@ def _missing_dep(dep_name: str, extra: str | None = None) -> str:
         msg += f" ({extra})"
     print(msg)
     return msg
+
+
+def build_openai_messages(system_prompt: str, user_prompt: str) -> list[dict]:
+    """Build OpenAI-style messages list. All major APIs (OpenAI, Anthropic, Together) use this format."""
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
 
 ANTHROPIC_MODEL_LIST = (
     "claude-1",
@@ -124,8 +133,12 @@ GEMINI_MODEL_LIST = (
     "gemini-1.5-flash-exp-0827",
     "gemini-1.5-flash-8b",
     "gemini-1.5-flash-8b-exp-0827",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
     "gemini-2.5-pro-preview-05-06",
     "gemini-2.5-flash-preview-04-17",
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
 )
 
 API_MODEL_LIST = OPENAI_MODEL_LIST + ANTHROPIC_MODEL_LIST + TOGETHER_MODEL_LIST + GEMINI_MODEL_LIST
@@ -224,6 +237,8 @@ def run_judge_four(question, answer_a, answer_b, answer_c, answer_d, model, mult
             winners.append(winner)
             judgments.append(judgment)
         return winners, user_prompt, judgments
+
+    messages = build_openai_messages(system_prompt, user_prompt)
 
     if model in OPENAI_MODEL_LIST:
         if OpenAI is None or openai is None:
@@ -630,9 +645,9 @@ def chat_completion_anthropic(model, conv, temperature, max_tokens, api_dict=Non
         api_key = os.environ["ANTHROPIC_API_KEY"]
 
     sys_msg = ""
-    if conv.messages[0]["role"] == "system":
-        sys_msg = conv.messages[0]["content"]
-        conv.messages = conv.messages[1:]
+    if messages[0]["role"] == "system":
+        sys_msg = messages[0]["content"]
+        messages = messages[1:]
 
     output = API_ERROR_OUTPUT
     for _ in range(API_MAX_RETRY):
@@ -640,7 +655,7 @@ def chat_completion_anthropic(model, conv, temperature, max_tokens, api_dict=Non
             c = anthropic.Anthropic(api_key=api_key)
             response = c.messages.create(
                 model=model,
-                messages=conv.messages,
+                messages=messages,
                 stop_sequences=[anthropic.HUMAN_PROMPT],
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -663,21 +678,32 @@ def chat_completion_gemini(model, conv, temperature, max_tokens, api_dict=None):
 
     for _ in range(API_MAX_RETRY):
         try:
-            response = api_model.generate_content(
-                conv,
-                generation_config=genai.types.GenerationConfig(
-                    # Only one candidate for now.
+            response = client.models.generate_content(
+                model=model,
+                contents=conv,
+                config=genai_types.GenerateContentConfig(
                     candidate_count=1,
                     max_output_tokens=max_tokens,
                     temperature=temperature,
+                    safety_settings=[
+                        genai_types.SafetySetting(
+                            category="HARM_CATEGORY_HATE_SPEECH",
+                            threshold="BLOCK_NONE",
+                        ),
+                        genai_types.SafetySetting(
+                            category="HARM_CATEGORY_HARASSMENT",
+                            threshold="BLOCK_NONE",
+                        ),
+                        genai_types.SafetySetting(
+                            category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                            threshold="BLOCK_NONE",
+                        ),
+                        genai_types.SafetySetting(
+                            category="HARM_CATEGORY_DANGEROUS_CONTENT",
+                            threshold="BLOCK_NONE",
+                        ),
+                    ],
                 ),
-                request_options={"timeout": 1000},  # eliminate Failed to connect to Gemini API: 504 Deadline Exceeded
-                safety_settings={
-                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-                },
             )
 
             # gemini refuses some rewardbench prompts
@@ -716,7 +742,6 @@ def chat_completion_together(model, conv, temperature, max_tokens, api_dict=None
     output = API_ERROR_OUTPUT
     for _ in range(API_MAX_RETRY):
         try:
-            messages = conv.to_openai_api_messages()
             response = client.chat.completions.create(
                 model=model, messages=messages, n=1, temperature=temperature, max_tokens=max_tokens
             )
@@ -737,7 +762,6 @@ def chat_completion_openai(model, conv, temperature, max_tokens, api_dict=None):
     output = API_ERROR_OUTPUT
     for _ in range(API_MAX_RETRY):
         try:
-            messages = conv.to_openai_api_messages()
             # remove system prompt for o1 models
             if "o1-" in model:
                 messages = messages[1:]
