@@ -688,8 +688,6 @@ AI assistant to the user query/context displayed below.
 
 Notes:
 1- Your evaluation should consider factors such as the helpfulness, relevance, accuracy, depth, creativity, and level of detail of the response(s).
-2- Begin your evaluation by providing a short explanation.
-3- Be as objective as possible. After providing your explanation, please rate the response on a scale of 0 to 5. For your rating, only give a number between 0 and 5 (inclusive).
 
 [Query / Context]
 {prompt}

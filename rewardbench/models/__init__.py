@@ -17,6 +17,7 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForSequenceClassification,
+    AutoModelForTokenClassification,
     AutoTokenizer,
     LlamaTokenizer,
     MixtralForCausalLM,
@@ -34,6 +35,7 @@ from .ldlreward import LDLPipeline, LDLRewardModel27B
 from .openassistant import *  # noqa
 from .openbmb import LlamaRewardModel, OpenBMBPipeline
 from .pairrm import DebertaV2PairRM, PairRMPipeline
+from .urm import *
 from .pipeline import RewardBenchPipeline
 from .qrm import LlamaForRewardModelWithGating3, LlamaForRewardModelWithGating31
 from .shp import SHPPipeline
@@ -62,6 +64,19 @@ REWARD_MODEL_CONFIG = {
         "quantized": False,
         "custom_dialogue": False,
         "model_type": "Seq. Classifier",
+    },
+    "parallelRM": {
+        "pipeline_builder": ParallelRMRewardBenchPipeline,
+        "quantized": True,
+        "custom_dialogue": True,
+        "model_type": "Custom Classifier",
+    },
+    "generative-parallelRM": {
+        "model_builder": Qwen3ForGenerativeRewarding.from_pretrained,
+        "pipeline_builder": ParallelRMRewardBenchPipeline,
+        "quantized": True,
+        "custom_dialogue": True,
+        "model_type": "Custom Classifier",
     },
     "ShikaiChen/LDL-Reward-Gemma-2-27B-v0.1": {
         "model_builder": LDLRewardModel27B.from_pretrained,
