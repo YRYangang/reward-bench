@@ -56,7 +56,12 @@ def apply_template(
         chosen[-1]["identifier"] = chosen_id_placeholder_token
         overall = prompt + [chosen[-1]] + [rejected[-1]] + [{"role": "judge", "content": content}]
         overall_reversed = prompt + [rejected[-1]] + [chosen[-1]] + [{"role": "judge", "content": content}]
+        # chosen[-1]["content"] = chosen[-1]["content"] + special_token
+        # rejected[-1]["content"] = rejected[-1]["content"] + special_token
+        # overall = prompt + [chosen[-1]] + [rejected[-1]] 
+        # overall_reversed = prompt + [rejected[-1]] + [chosen[-1]] 
         if with_thinking:
+            # raise NotImplementedError("Thinking is not supported for judge mode")
             # TODO: the key is text_thinking
             overall[-1]["reasoning_content"] = example["text_thinking"]
             overall_reversed[-1]["reasoning_content"] = example["text_thinking"]

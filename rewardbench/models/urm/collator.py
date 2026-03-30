@@ -234,7 +234,7 @@ class ParallelDataCollatorForPreference:
             bot_id = self.thinking_begin_token_id
             eot_id = self.thinking_end_token_id
         for example in examples:
-            shuffle = random.random() < 0.5
+            shuffle = example.get("shuffle", random.random() < 0.5)
             shuffled.append(shuffle)
             overall_key = "overall" if not shuffle else "overall_reversed"
             prompt_input_ids = example["prompt_input_ids"]
@@ -288,7 +288,7 @@ class ParallelDataCollatorForPreference:
                             torch.zeros(prompt_len),
                             torch.zeros(chosen_len) + 1,
                             torch.zeros(rejected_len) + 2,
-                            # torch.zeros(judge_len),
+                            torch.zeros(judge_len),
                         ],
                         dim=0,
                     )
@@ -298,17 +298,17 @@ class ParallelDataCollatorForPreference:
                             torch.zeros(prompt_len),
                             torch.zeros(rejected_len) + 1,
                             torch.zeros(chosen_len) + 2,
-                            # torch.zeros(judge_len),
+                            torch.zeros(judge_len),
                         ],
                         dim=0,
                     )
                 # see if there is any judge tokens in the input_ids
-                # has_judge_tokens = (overall_input_ids == self.judge_token_id).any().item()
-                # if has_judge_tokens:
-                #     # additionally set the judge tokens complesion mask
-                #     complesion_mask[overall_input_ids == self.judge_token_id] = torch.tensor(
-                #         [1, 2], dtype=torch.float, device=complesion_mask.device
-                #     )
+                has_judge_tokens = (overall_input_ids == self.judge_token_id).any().item()
+                if has_judge_tokens:
+                    # additionally set the judge tokens complesion mask
+                    complesion_mask[overall_input_ids == self.judge_token_id] = torch.tensor(
+                        [1, 2], dtype=torch.float, device=complesion_mask.device
+                    )
 
                 attention_mask = construct_attn_mask(
                     seq_len=overall_input_ids.shape[0], local_mask=complesion_mask
@@ -322,12 +322,12 @@ class ParallelDataCollatorForPreference:
                         prompt_len=prompt_len, local_lens=[rejected_len, chosen_len], global_len=judge_len
                     )
 
-                # if has_judge_tokens:
-                #     _nonzero_list = (overall_input_ids == self.judge_token_id).nonzero().view(-1)
-                #     # set the judge tokens to **identical position ids** ( the pos of the first judge token)
-                #     position_id[_nonzero_list] = position_id[_nonzero_list[0]].item()
-                #     # then set all the ids afterwards - 1
-                #     position_id[_nonzero_list[-1] + 1 :] = position_id[_nonzero_list[-1] + 1 :] - 1
+                if has_judge_tokens:
+                    _nonzero_list = (overall_input_ids == self.judge_token_id).nonzero().view(-1)
+                    # set the judge tokens to **identical position ids** ( the pos of the first judge token)
+                    position_id[_nonzero_list] = position_id[_nonzero_list[0]].item()
+                    # then set all the ids afterwards - 1
+                    position_id[_nonzero_list[-1] + 1 :] = position_id[_nonzero_list[-1] + 1 :] - 1
 
                 assert (
                     len(position_id) == overall_input_ids.shape[0]
@@ -469,14 +469,15 @@ class ParallelDataCollatorForMultiplePreference(ParallelDataCollatorForPreferenc
             rejected_input_ids = [rejected[prompt_len:] for rejected in example["rejected_input_ids"]]
             rejected_lens = [len(rejected) for rejected in rejected_input_ids]
             rejected_input_tensors = [torch.tensor(rejected) for rejected in rejected_input_ids]
-            # shuffle = example.get("shuffle", random.random() < 0.5)
-            # TODO: add shuffle, currently not supported
+            shuffle = example.get("shuffle", random.random() < 0.5)
+            if shuffle:
+                raise NotImplementedError("Shuffle is not supported for multiple preference")
             input_ids = torch.cat(
                 [torch.tensor(prompt_input_ids)] + chosen_input_tensors + rejected_input_tensors,
-                dim=0,
+                dim=0,  
             )
             all_input_ids.append(input_ids)
-            shuffled.append(False)
+            shuffled.append(shuffle)
             if self.parallel_context:
                 complesion_mask = [torch.zeros(prompt_len)]
                 for chosen_len in chosen_lens:

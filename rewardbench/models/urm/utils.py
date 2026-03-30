@@ -130,7 +130,7 @@ def construct_pos_ids(
     for i in range(len(local_lens)):
         prompt_comp_len = prompt_len + local_lens[i]
         position_ids += [torch.arange(prompt_len, prompt_comp_len)]
-    if global_len is not None:
+    if global_len is not None and global_len > 0:
         max_full_len = prompt_len + max(local_lens)
         position_ids += [torch.arange(max_full_len, max_full_len + global_len)]
 

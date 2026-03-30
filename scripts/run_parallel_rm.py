@@ -189,18 +189,20 @@ def main():
     if args.standard:
         model_builder = AutoModelForSequenceClassification
     else:
-        model_builder = Qwen3ForGenerativeRewarding if args.use_judge_role else AutoModelForTokenClassification
+        model_builder = (
+            Qwen3ForGenerativeRewarding if args.use_judge_role else AutoModelForTokenClassification
+        )
     model_builder = model_builder.from_pretrained
     pipeline_builder = config["pipeline_builder"]
     torch_dtype = config.get("torch_dtype", None)
 
     # if not datatype in config (default), check args
-    if torch_dtype is None:
-        # if datatype is bfloat16, then manually turn off quantizaiton (done with bitsandbytes)
-        if args.torch_dtype == torch.bfloat16:
-            quantized = False
-            logger.info("Disabling quantization for bfloat16 datatype")
-        torch_dtype = args.torch_dtype
+    # if torch_dtype is None:
+    #     # if datatype is bfloat16, then manually turn off quantizaiton (done with bitsandbytes)
+    #     if args.torch_dtype == torch.bfloat16:
+    #         quantized = False
+    #         logger.info("Disabling quantization for bfloat16 datatype")
+    #     torch_dtype = args.torch_dtype
 
     # not included in config to make user explicitly understand they are passing this
     trust_remote_code = args.trust_remote_code
@@ -361,6 +363,7 @@ def main():
         results_grouped[subset] = num_correct / num_total
 
     # log leaderboard aggregated results
+    results_leaderboard = None
     if not args.pref_sets:
         results_leaderboard = calculate_scores_per_section(EXAMPLE_COUNTS, SUBSET_MAPPING, results_grouped)
         print(results_leaderboard)
@@ -380,6 +383,20 @@ def main():
     )
     if not args.do_not_save:
         logger.info(f"Uploaded reward model results to {results_url}")
+
+    if results_leaderboard is not None:
+        sub_path_leaderboard = "eval-set-leaderboard/"
+        leaderboard_url = save_to_hub(
+            results_leaderboard,
+            args.model,
+            sub_path_leaderboard,
+            args.debug,
+            local_only=args.do_not_save,
+            save_metrics_for_beaker=not args.disable_beaker_save,
+            save_postfix=getattr(args, "save_postfix", ""),
+        )
+        if not args.do_not_save:
+            logger.info(f"Uploaded leaderboard results to {leaderboard_url}")
 
     # upload chosen-rejected with scores
     if not model_type == "Custom Classifier":  # custom classifiers do not return scores

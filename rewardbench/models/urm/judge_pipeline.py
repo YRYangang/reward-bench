@@ -1,7 +1,7 @@
 from types import MethodType
-
+import random
 import torch
-from transformers import GenerationConfig, Pipeline
+from transformers import GenerationConfig, LogitsProcessorList, NoBadWordsLogitsProcessor, Pipeline
 
 from rewardbench.models.urm.collator import ParallelDataCollatorForPreference
 from rewardbench.models.urm.utils import prepare_inputs_for_generation, tokenize_fn
@@ -13,7 +13,7 @@ class ParallelRMRewardBenchJudgePipeline(Pipeline):
     This class outputs a delta rather than a score for each.
     """
 
-    def __init__(self, parallel_context:bool, enable_thinking:bool, **kwargs):
+    def __init__(self, parallel_context: bool, enable_thinking: bool, **kwargs):
         super().__init__(**kwargs)
         self.model.eval().requires_grad_(False)
         self.parallel_context = parallel_context
@@ -22,8 +22,8 @@ class ParallelRMRewardBenchJudgePipeline(Pipeline):
         self.bot_id = self.tokenizer.convert_tokens_to_ids("<think>")
 
         self.judge_token = "<|judgement|>"
-
-        self.model.prepare_inputs_for_generation = MethodType(prepare_inputs_for_generation, self.model)
+        if enable_thinking and parallel_context:
+            self.model.prepare_inputs_for_generation = MethodType(prepare_inputs_for_generation, self.model)
 
         self.chosen_id_placeholder_token = "<|object_ref_start|>"
         self.rejected_id_placeholder_token = "<|object_ref_end|>"
@@ -42,6 +42,17 @@ class ParallelRMRewardBenchJudgePipeline(Pipeline):
             chosen_placeholder_token_id=self.chosen_id_placeholder_token_id,
             rejected_placeholder_token_id=self.rejected_id_placeholder_token_id,
             judge_token=self.judge_token,
+        )
+
+    def _logits_processor_no_judge_while_generating(self) -> LogitsProcessorList:
+        """Ban <|judgement|> during `generate`; judge slots are appended after generation."""
+        return LogitsProcessorList(
+            [
+                NoBadWordsLogitsProcessor(
+                    bad_words_ids=[[int(self.collator.judge_token_id)]],
+                    eos_token_id=self.eot_id,
+                )
+            ]
         )
 
     def _move_tensors(self, inputs: dict):
@@ -76,6 +87,7 @@ class ParallelRMRewardBenchJudgePipeline(Pipeline):
 
     def preprocess(self, inputs: dict):
         inputs["text_thinking"] = "abracadabra"
+
         result = apply_template(
             example=inputs,
             use_judge_token=True,
@@ -89,18 +101,26 @@ class ParallelRMRewardBenchJudgePipeline(Pipeline):
         if self.enable_thinking:
             _position = result["overall_input_ids"].index(self.bot_id)
             result["overall_input_ids"] = result["overall_input_ids"][: _position + 1]
-
+            _position = result["overall_reversed_input_ids"].index(self.bot_id)
+            result["overall_reversed_input_ids"] = result["overall_reversed_input_ids"][: _position + 1]
+        result["shuffle"] = random.random() < 0.5
         self.tmp_tokenize_results = result
 
         result = self.collator([result])
         result = self._move_tensors(result)
         return result
 
-    def _re_collate(self, new_input_ids: torch.Tensor, cache_position: int | None = None, shuffle: bool |None = None):
+    def _re_collate(self, new_input_ids: torch.Tensor, cache_position: int | None = None):
         result = self.tmp_tokenize_results
-        result["overall_input_ids"] = new_input_ids.view(-1).tolist()
+        shuffle = result["shuffle"]
+        if shuffle:
+            result["overall_reversed_input_ids"] = new_input_ids.view(-1).tolist()
+            del result["overall_input_ids"]
+        else:
+            result["overall_input_ids"] = new_input_ids.view(-1).tolist()
+            del result["overall_reversed_input_ids"]
         assert not (new_input_ids == self.tokenizer.pad_token_id).any().item()
-        result["shuffle"] = shuffle
+
         result = self.collator([result])
         result = self._move_tensors(result)
         if cache_position is not None:
@@ -125,6 +145,7 @@ class ParallelRMRewardBenchJudgePipeline(Pipeline):
             use_cache=True,
             eos_token_id=self.eot_id,
             generation_config=generation_config,
+            logits_processor=self._logits_processor_no_judge_while_generating(),
             return_dict_in_generate=True,
         )
         final_kv = gen_outputs.past_key_values
@@ -156,7 +177,6 @@ class ParallelRMRewardBenchJudgePipeline(Pipeline):
         else:
             return self._forward_naive(model_inputs, generation_config)
 
-
     def _forward_no_think(
         self,
         model_inputs,
@@ -165,7 +185,7 @@ class ParallelRMRewardBenchJudgePipeline(Pipeline):
             shuffle = model_inputs.pop("shuffled")[0]
         else:
             shuffle = False
-        result =  self.model.forward(**model_inputs)
+        result = self.model.forward(**model_inputs)
         return {
             "judge_logits": result.judge_logits.flatten().tolist(),
             "shuffle": shuffle,
@@ -176,7 +196,10 @@ class ParallelRMRewardBenchJudgePipeline(Pipeline):
         model_inputs,
         generation_config: GenerationConfig | None = None,
     ):
-
+        if "shuffled" in model_inputs:
+            shuffle = model_inputs.pop("shuffled")[0]
+        else:
+            shuffle = False
         outputs = self.model.forward(**model_inputs, use_cache=True, logits_to_keep=1)
         kv_cache = outputs.past_key_values
         next_token = outputs.logits[0, -1, :].argmax().view(1, 1)
@@ -195,6 +218,7 @@ class ParallelRMRewardBenchJudgePipeline(Pipeline):
             use_cache=True,
             eos_token_id=self.eot_id,
             generation_config=generation_config,
+            logits_processor=self._logits_processor_no_judge_while_generating(),
             return_dict_in_generate=True,
         )
         final_kv = gen_outputs.past_key_values
@@ -215,4 +239,5 @@ class ParallelRMRewardBenchJudgePipeline(Pipeline):
         return {
             "judge_logits": inputs.judge_logits.flatten().tolist(),
             "output_ids": new_full_input_ids,
+            "shuffle": shuffle,
         }

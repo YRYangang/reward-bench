@@ -24,7 +24,7 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from fastchat.conversation import get_conv_template
 from tqdm import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from rewardbench import (
     REWARD_MODEL_CONFIG,
@@ -32,14 +32,10 @@ from rewardbench import (
     save_to_hub,
     torch_dtype_mapping,
 )
-from rewardbench.models.urm import (
-    apply_template,
-    tokenize_fn,
-    ParallelDataCollatorForPreference,
+from rewardbench.models.basic_sft_model import (
+    BasicSFTJudgePipeline,
     Qwen3ForGenerativeRewarding,
-    ParallelRMRewardBenchJudgePipeline,
 )
-from transformers import AutoModelForTokenClassification
 from rewardbench.constants import EXAMPLE_COUNTS, SUBSET_MAPPING
 from rewardbench.utils import calculate_scores_per_section
 from rewardbench.script_args import add_common_generative_args
@@ -72,8 +68,8 @@ def get_args():
     parser.add_argument(
         "--max_length",
         type=int,
-        default=2048,
-        help="Max length of RM inputs (passed to pipeline)",
+        default=None,
+        help="Max length of RM inputs (passed to pipeline); omit for no truncation",
     )
     parser.add_argument(
         "--not_quantized",
@@ -95,9 +91,11 @@ def get_args():
         help="Attention implementation to use (default: None)",
     )
     parser.add_argument(
-        "--parallel_context",
-        action="store_true",
-        help="Whether to use parallel context",
+        "--paradigm",
+        type=str,
+        default="generative",
+        choices=["generative", "discriminative"],
+        help="The paradigm to use for training.",
     )
     parser.add_argument(
         "--enable_thinking",
@@ -138,48 +136,10 @@ def main():
     if args.trust_remote_code:
         logger.info("Loading model with Trust Remote Code")
 
-    # load chat template
-    if args.chat_template is not None:
-        logger.info(f"Loading chat template {args.chat_template}")
-        conv = get_conv_template(args.chat_template)
-    else:
-        logger.info("No chat template provided, using default")
-        conv = None
-
-    config = REWARD_MODEL_CONFIG["parallelRM"]
-    logger.info(f"Using reward model config: {config}")
-
-    quantized = config["quantized"]  # only Starling isn't quantized for now
-    # if llama-3 in name, switch quantized to False (severely degrades performance)
-    if (
-        ("llama-3" in args.model)
-        or ("Llama3" in args.model)
-        or ("Llama-3" in args.model)
-        or ("LLaMA3" in args.model)
-        or ("llama3" in args.model)
-        or args.not_quantized
-    ):
-        quantized = False
-        logger.info(
-            f"Disabling quantization for llama-3 or override flag (--not_quantized: {args.not_quantized})"
-        )
-
-    custom_dialogue = config["custom_dialogue"]
-    model_builder = Qwen3ForGenerativeRewarding
-    model_builder = model_builder.from_pretrained
-    pipeline_builder = ParallelRMRewardBenchJudgePipeline
-    torch_dtype = config.get("torch_dtype", None)
-
-    # if not datatype in config (default), check args
-    if torch_dtype is None:
-        # if datatype is bfloat16, then manually turn off quantizaiton (done with bitsandbytes)
-        if args.torch_dtype == torch.bfloat16:
-            quantized = False
-            logger.info("Disabling quantization for bfloat16 datatype")
-        torch_dtype = args.torch_dtype
-
-    # not included in config to make user explicitly understand they are passing this
-    trust_remote_code = args.trust_remote_code
+    # Generative basic-SFT training uses AutoModelForCausalLM; discriminative uses Qwen3ForGenerativeRewarding.
+    model_cls = Qwen3ForGenerativeRewarding if args.paradigm == "discriminative" else AutoModelForCausalLM
+    model_builder = model_cls.from_pretrained
+    pipeline_builder = BasicSFTJudgePipeline
 
     ############################
     # Load dataset
@@ -188,8 +148,8 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
     dataset, subsets = load_eval_dataset(
         core_set=not args.pref_sets,
-        conv=conv,
-        custom_dialogue_formatting=custom_dialogue,
+        conv=None,
+        custom_dialogue_formatting=True,
         tokenizer=tokenizer,
         logger=logger,
         keep_columns=["text_chosen", "text_rejected", "id"],
@@ -208,26 +168,15 @@ def main():
     ############################
     # Load reward model pipeline
     ############################
-    BATCH_SIZE = args.batch_size
+    batch_size = args.batch_size
     logger.info("*** Load reward model ***")
-    if quantized:
-        model_kwargs = {
-            "load_in_8bit": True,
-            "device_map": {"": current_device},
-            "torch_dtype": torch_dtype if torch.cuda.is_available() else None,
-        }
-    else:
-        model_kwargs = {
-            "device_map": "auto" if torch.cuda.is_available() else "cpu",
-            "torch_dtype": torch_dtype,
-        }
 
-    # if attn_implementation is not specified, this falls back to Hugging Face's default
-    # strategy (which chooses between sdpa and eager depending on pytorch version)
-    if args.attn_implementation:
-        model_kwargs["attn_implementation"] = args.attn_implementation
+    model_kwargs = {
+        "device_map": "auto" if torch.cuda.is_available() else "cpu",
+        "trust_remote_code": args.trust_remote_code,
+    }
 
-    model = model_builder(args.model, **model_kwargs, trust_remote_code=trust_remote_code)
+    model = model_builder(args.model, **model_kwargs)
     if args.debug:
         model.generation_config.max_new_tokens = 10
     # model.generation_config.max_new_tokens = 500
@@ -235,8 +184,9 @@ def main():
     reward_pipe = pipeline_builder(
         model=model,
         tokenizer=tokenizer,
-        parallel_context=args.parallel_context,
+        paradigm=args.paradigm,
         enable_thinking=args.enable_thinking,
+        max_length=args.max_length,
     )
 
     ############################
@@ -257,7 +207,8 @@ def main():
     results = []
     scores_chosen = []
     scores_rejected = []
-    for step, batch in enumerate(tqdm(dataset, desc="RM batch steps")):
+    for step, start in enumerate(tqdm(range(0, len(dataset), batch_size), desc="RM batch steps")):
+        batch = dataset.select(range(start, min(start + batch_size, len(dataset))))
         results_sub = reward_pipe(inputs=batch)
         results.extend(results_sub["results"])
         scores_chosen.extend(results_sub["rewards_chosen"])

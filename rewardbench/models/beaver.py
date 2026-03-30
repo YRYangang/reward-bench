@@ -403,7 +403,7 @@ class LlamaForScore(ScoreModelMixin, LlamaPreTrainedModel):
     def get_decoder(self) -> PreTrainedModel:
         return self.model
 
-    @replace_return_docstrings(output_type=ScoreModelOutput, config_class=LlamaConfig)
+    # @replace_return_docstrings(output_type=ScoreModelOutput, config_class=LlamaConfig)
     def forward(  # pylint: disable=too-many-arguments
         self,
         input_ids: torch.LongTensor | None = None,
